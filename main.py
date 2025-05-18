@@ -1,7 +1,6 @@
-import os, random
-import getpass
-import sys
+import os, random, getpass, sys
 from database import ClueData
+from typing import List, Tuple
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -14,6 +13,7 @@ class ClueGameApp:
         self.accomplice_password = None
         self.accomplice_id = None
         self.current_act = 1
+        self.game_state = "WAITING"
 
     def authenticate(self, prompt, password=None):
         clear_screen()
@@ -27,19 +27,28 @@ class ClueGameApp:
             return c.fetchone()[0]
     
     def reset_all_players(self):
+        """Reset all player login statuses"""
         with self.db.cursor() as c:
-            c.execute('UPDATE players SET is_murderer=NULL, has_completed=0')
+            c.execute('UPDATE players SET is_murderer=NULL, is_accomplice=0, has_completed=0')
         self.murderer_passwords = {}
+        self.accomplice_id = None
+        self.accomplice_password = None
+        self.db.commit()
         print("\nAll player logins have been reset!")
         input("Press Enter to continue...")
 
-    def reset_single_player(self, player_id):
+    def reset_single_player(self, player_id: int):
+        """Reset a single player's login status"""
         with self.db.cursor() as c:
-            c.execute('UPDATE players SET is_murderer=NULL, has_completed=0 WHERE id=?', (player_id,))
+            c.execute('UPDATE players SET is_murderer=NULL, is_accomplice=0, has_completed=0 WHERE id=?', (player_id,))
         self.murderer_passwords.pop(player_id, None)
+        if player_id == self.accomplice_id:
+            self.accomplice_id = None
+            self.accomplice_password = None
+        self.db.commit()
         print("\nPlayer login has been reset!")
         input("Press Enter to continue...")
-
+    
     def confirm_action(self, prompt):
         while True:
             response = input(f"{prompt} (yes/no): ").lower().strip()
@@ -120,26 +129,31 @@ class ClueGameApp:
             else:
                 print("Password must be at least 4 characters")
 
-    def setup_accomplice(self, player_id, player_name):
-        """Set up accomplice with password"""
+    def setup_accomplice(self, player_id: int, player_name: str):
+        """Set up an accomplice with a password"""
         self.accomplice_id = player_id
         
-        print(f"\n{player_name}, create your accomplice password (min 4 chars):")
+        # Update database
+        with self.db.cursor() as c:
+            # First clear any existing accomplice
+            c.execute('UPDATE players SET is_accomplice=0')
+            # Set new accomplice
+            c.execute('UPDATE players SET is_accomplice=1 WHERE id=?', (player_id,))
+        self.db.commit()
+        
+        print("\nAs an accomplice, create a password to view murderers:")
         while True:
-            password = getpass.getpass("Password: ")
+            password = self.authenticate("CREATE PASSWORD")
             if len(password) >= 4:
                 if self.confirm_action(f"Confirm password '{password}' is correct?"):
-                    # Store password in database
-                    with self.db.cursor() as c:
-                        c.execute('UPDATE players SET password=?, is_accomplice=1 WHERE id=?', 
-                                (password, player_id))
-                    self.db.mark_player_completed(player_id)
-                    print(f"\nPassword set! Remember it, {player_name}!")
-                    input("Press Enter to continue...")
+                    self.accomplice_password = password
                     break
-            else:
-                print("Password must be at least 4 characters")
-
+            print("Password must be at least 4 characters")
+        
+        self.db.mark_player_completed(player_id)
+        print(f"\nThank you {player_name}. Remember your password!")
+        input("Press Enter to continue...")
+    
     def murderer_login(self):
         """Handle murderer login without revealing roles"""
         clear_screen()
@@ -266,7 +280,9 @@ class ClueGameApp:
                 print(f"{idx}. {name}{status}")
             
             if all(completed for _, _, completed in players):
-                self.check_roles_setup()
+                # Only show verification if explicitly accessed through host menu
+                if self.game_state == "WAITING":
+                    self.check_roles_setup()
                 return
             
             try:
@@ -338,139 +354,165 @@ class ClueGameApp:
                 input("Press Enter to continue...")
 
     def check_roles_setup(self):
+        """Verify roles are properly assigned (only called once)"""
         clear_screen()
         print("=== ROLES VERIFICATION ===")
         
         murderer_count = self.check_murderer_count()
         accomplice_count = 1 if self.accomplice_id else 0
+        
         issues_found = False
         
         if murderer_count != 2:
             print(f"\nWARNING: {murderer_count} murderer(s) selected (need exactly 2)!")
             issues_found = True
         
-        if accomplice_count > 1:
-            print(f"\nWARNING: {accomplice_count} accomplices selected (max 1 allowed)!")
-            issues_found = True
-        elif accomplice_count < 1:
-            print("\nWARNING: No accomplice selected!")
+        if accomplice_count != 1:
+            print(f"\nWARNING: {accomplice_count} accomplice(s) selected (need exactly 1)!")
             issues_found = True
         
         if not issues_found:
             print("\nAll roles properly assigned!")
             print("- 2 murderers selected")
             print("- 1 accomplice selected")
+            self.game_state = "READY"
+            # Initialize game clues only once
+            self._select_final_clues_for_acts()
+            print("\nGame clues have been initialized!")
+        else:
+            print("\nRole setup incomplete!")
         
         input("\nPress Enter to continue...")
-
-    def prepare_clue_pools(self):
-        """Assign random clue sets (1-3) to each character"""
+    
+    def _prepare_game_if_needed(self):
+        """Prepare game if all players are registered but game isn't setup"""
         with self.db.cursor() as c:
-            # Assign random clue sets to each character (stored in has_completed field)
-            for char_id in range(1, 9):
-                set_number = random.randint(1, 3)
-                c.execute("UPDATE players SET has_completed=? WHERE id=?", (set_number, char_id))
+            c.execute('SELECT COUNT(*) FROM game_clues')
+            if c.fetchone()[0] == 0:  # Only prepare if no clues exist
+                self._assign_clue_sets()
+                self._select_final_clues_for_acts()
+                print("\nGame setup complete! Clues have been assigned.")
+                input("Press Enter to continue...")
 
-    def get_weighted_clues(self, act):
-        """Get all clues for current act with weights based on murderer status"""
+    def initialize_game_clues(self):
+        """Initialize game-wide clues using weighted selection when game is ready"""
+        if not self._all_players_ready():
+            return False
+        
+        # Assign clue sets to characters
+        self._assign_clue_sets()
+        
+        # Select and store final clues for all acts
+        self._select_final_clues_for_acts()
+        return True
+
+    def _all_players_ready(self) -> bool:
+        """Check if all players have completed registration"""
+        players = self.db.get_players_with_status()
+        return all(completed for _, _, completed in players)
+
+    def _assign_clue_sets(self):
+        """Randomly assign clue sets to characters"""
+        with self.db.cursor() as c:
+            for char_id in range(1, 9):  # Assuming 8 players
+                set_number = random.randint(1, 3)
+                c.execute('UPDATE players SET has_completed=? WHERE id=?', 
+                        (set_number, char_id))
+        self.db.commit()
+
+    def _select_final_clues_for_acts(self):
+        """Select and store final clues for all acts using weighted selection"""
+        with self.db.cursor() as c:
+            # Clear any existing game clues
+            c.execute('DELETE FROM game_clues')
+            
+            for act in range(1, 4):  # Acts 1-3
+                clues = self._select_weighted_clues(act)
+                c.execute('''
+                    INSERT INTO game_clues (act, clue1, clue2, clue3)
+                    VALUES (?, ?, ?, ?)
+                ''', (act, *clues))
+        self.db.commit()
+
+    def _select_weighted_clues(self, act: int) -> List[str]:
+        """Select 3 clues for an act with murderer weighting"""
         with self.db.cursor() as c:
             c.execute('''
-                SELECT c.description, p.is_murderer
+                SELECT c.description, 
+                    CASE WHEN p.is_murderer=1 THEN 3 ELSE 1 END as weight
                 FROM clues c
                 JOIN players p ON c.character_id = p.id
                 WHERE c.act = ? 
                 AND c.set_number = p.has_completed
             ''', (act,))
-            
-            clues = []
-            for description, is_murderer in c.fetchall():
-                # Assign higher weight to murderer's clues (3x)
-                weight = 3 if is_murderer else 1
-                clues.append((description, weight))
-            
-            return clues
-
-    def reveal_act_clues(self):
-        """Host interface for revealing clues for current act"""
-        clear_screen()
-        print(f"=== ACT {self.current_act} CLUES ===")
-        
-        # Get and display 3 weighted clues
-        clues = self.select_clues_for_act(self.current_act)
-        
-        if not clues:
-            print("No clues found for this act!")
-            input("Press Enter to continue...")
-            return
-        
-        print("\nSelected clues for this act:")
-        for i, clue in enumerate(clues[:3], 1):  # Ensure exactly 3 clues
-            # Clean up clue display by removing set info
-            clean_clue = clue.split(' - Act ')[0]  # Just show character and clue
-            print(f"{i}. {clean_clue}")
-        
-        # Show which characters these clues came from (without set info)
-        print("\nClue origins:")
-        with self.db.cursor() as c:
-            for clue in clues[:3]:
-                # Extract base clue info for lookup
-                base_clue = clue.split(' - Act')[0]
-                c.execute('''
-                    SELECT p.name 
-                    FROM clues c
-                    JOIN players p ON c.character_id = p.id
-                    WHERE c.description LIKE ? 
-                    AND c.act = ?
-                    LIMIT 1
-                ''', (f"{base_clue}%", self.current_act))
-                result = c.fetchone()
-                if result:
-                    print(f"- From {result[0]}'s clues")
-        
-        input("\nPress Enter to continue...")
-
-    def select_clues_for_act(self, act):
-        """Select 3 clues for specified act using weighted random selection"""
-        weighted_clues = self.get_weighted_clues(act)
+            weighted_clues = c.fetchall()
         
         if not weighted_clues:
-            return []
+            return ["No clues available"] * 3
         
-        # Extract clues and weights
-        clues, weights = zip(*weighted_clues)
+        # Convert to separate lists for random.choices
+        clues = [row[0] for row in weighted_clues]
+        weights = [row[1] for row in weighted_clues]
         
-        # Select 3 unique clues with weighted probability
+        # Select 3 unique clues with weighting
         selected = []
-        while len(selected) < 3 and len(clues) > 0:
-            # Get one random clue
-            new_clue = random.choices(clues, weights=weights, k=1)[0]
-            
-            # Add if not already selected
-            if new_clue not in selected:
-                selected.append(new_clue)
-            
-            # Prevent infinite loops if not enough unique clues
-            if len(selected) == len(clues):
-                break
+        remaining = list(zip(clues, weights))
         
-        return selected[:3]  # Return exactly 3 clues
-    def advance_act(self):
-        """Move to the next act"""
-        if self.current_act < 3:
-            self.current_act += 1
-            print(f"\nAdvanced to Act {self.current_act}")
+        while len(selected) < 3 and remaining:
+            remaining_clues, remaining_weights = zip(*remaining)
+            chosen = random.choices(remaining_clues, weights=remaining_weights, k=1)[0]
+            selected.append(chosen)
+            remaining = [c for c in remaining if c[0] != chosen]
+        
+        return selected[:3]
+    
+    def get_game_clues(self, act: int) -> List[str]:
+        """Get pre-formatted game clues for a specific act"""
+        with self.db.cursor() as c:
+            c.execute('SELECT clue1, clue2, clue3 FROM game_clues WHERE act=?', (act,))
+            row = c.fetchone()
+            if row:
+                return [row['clue1'], row['clue2'], row['clue3']]
+        return []
+  
+    def display_act_clues(self, act: int):
+        """Display pre-formatted clues for a specific act"""
+        clear_screen()
+        print(f"=== ACT {act} CLUES ===")
+        
+        clues = self.get_game_clues(act)
+        if not clues:
+            print("\nERROR: No clues available!")
+            print("Possible reasons:")
+            print("- Not all players have completed registration")
+            print("- Game setup hasn't run yet")
         else:
-            print("\nThis is the final act!")
+            print("\nClues revealed:")
+            for i, clue in enumerate(clues, 1):
+                print(f"{i}. {clue}")
+        
+        input("\nPress Enter to continue...")
+    
+    def advance_act(self):
+        """Advance to the next act"""
+        if self.current_act >= 3:
+            print("\nGame completed! All acts finished.")
+            self.game_state = "COMPLETED"
+        else:
+            self.current_act += 1
+            print(f"\nAdvanced to Act {self.current_act}!")
+        
         input("Press Enter to continue...")
-
+    
     def reset_options(self):
         """Reset game options while preserving player roles"""
         clear_screen()
         print("=== RESET OPTIONS ===")
         print("1. Reset All Clue Assignments")
         print("2. Reset Current Act")
-        print("3. Reset Player Checkin")
-        print("4. Back to Host Menu")
+        print("3. Reset All Player Checkin")
+        print("4. Reset Single Player Checkin")
+        print("5. Back to Host Menu")
         
         choice = input("Select an option: ").strip()
         
@@ -483,55 +525,51 @@ class ClueGameApp:
                 self.current_act = 1
                 print("\nAct reset to Act 1!")
         elif choice == '3':
-            if self.confirm_action("Reset all player check-ins/logins?"):
-                with self.db.cursor() as c:
-                    # Reset has_completed flag but keep roles
-                    c.execute('UPDATE players SET has_completed=0')
-                print("\nAll player check-ins/logins have been reset!")
+            if self.confirm_action("Reset all player checkins?"):
+                self.reset_all_players()
+                print("\nAll player checkins have been reset!")
         elif choice == '4':
+            if self.confirm_action("Reset one player checkins?"):
+                player_id = int(input("User ID to reset: "))
+                self.reset_single_player(player_id)
+                print("\nThis player checkins have been reset!")    
+        elif choice == '5':
             return
         else:
             print("Invalid choice")
         
         input("Press Enter to continue...")
 
-    def host_clue_reveal(self):
-        if not self.authenticate("HOST LOGIN", self.host_password):
-            print("Invalid host password!")
-            input("Press Enter to continue...")
-            return
+    def check_roles_setup(self):
+        """Manual role verification"""
+        clear_screen()
+        print("=== ROLES VERIFICATION ===")
         
-        while True:
-            clear_screen()
-            print("=== HOST MENU ===")
-            print(f"Current Act: {self.current_act}")
-            print("1. Reveal Clues for Current Act")
-            print("2. Advance to Next Act")
-            print("3. View Murderers")
-            print("4. View Accomplice")
-            print("5. Reset Options")
-            print("6. Back to Main Menu")
-            
-            choice = input("Select an option: ").strip()
-            
-            if choice == '1':
-                self.reveal_act_clues()
-            elif choice == '2':
-                self.advance_act()
-            elif choice == '3':
-                if self.authenticate("MURDERER REVEAL", self.host_password):
-                    self.view_murderers_host()
-            elif choice == '4':
-                if self.authenticate("ACCOMPLICE REVEAL", self.host_password):
-                    self.view_accomplice()
-            elif choice == '5':
-                self.reset_options()
-            elif choice == '6':
-                return
-            else:
-                print("Invalid choice. Please try again.")
-                input("Press Enter to continue...")
+        murderer_count = self.check_murderer_count()
+        accomplice_count = 1 if self.accomplice_id else 0
+        
+        print(f"\nCurrent Status:")
+        print(f"- Murderers: {murderer_count}/2")
+        print(f"- Accomplice: {accomplice_count}/1")
+        
+        if murderer_count == 2 and accomplice_count == 1:
+            print("\nAll roles properly assigned!")
+            self.game_state = "READY"
+            if not self._game_clues_exist():  # Only initialize if needed
+                self._select_final_clues_for_acts()
+                print("\nGame clues initialized!")
+        else:
+            print("\nWARNING: Role setup incomplete!")
+            print("Please complete role assignments through Player Login")
+        
+        input("Press Enter to continue...")
 
+    def _game_clues_exist(self) -> bool:
+        """Check if game clues already exist"""
+        with self.db.cursor() as c:
+            c.execute('SELECT COUNT(*) FROM game_clues')
+            return c.fetchone()[0] > 0    
+  
     def view_murderers_host(self):
         clear_screen()
         print("=== MURDERER LIST ===")
@@ -563,24 +601,49 @@ class ClueGameApp:
         
         input("\nPress Enter to continue...")
 
+    def host_clue_reveal(self):
+        if not self.authenticate("HOST LOGIN", self.host_password):
+            print("Invalid host password!")
+            input("Press Enter to continue...")
+            return
+        
+        while True:
+            clear_screen()
+            print("=== HOST MENU ===")
+            print(f"Game State: {self.game_state} | Current Act: {self.current_act}")
+            print("1. Reveal Current Act Clues")
+            print("2. View Murderers")
+            print("3. View Accomplice")
+            print("4. Reset Options")
+            print("5. Advance Act")
+            print("6. Back to Main Menu")
+            
+            choice = input("Select an option: ").strip()
+            
+            if choice == '1':
+                self.display_act_clues(self.current_act)
+            elif choice == '2':
+                self.view_murderers_host()
+            elif choice == '3':
+                self.view_accomplice()
+            elif choice == '4':
+                self.reset_options()
+            elif choice == '5':
+                self.advance_act()  # No state check needed
+            elif choice == '6':
+                return
+            else:
+                print("Invalid choice. Please try again.")
+                input("Press Enter to continue...")  
+    
     def main_menu(self):
         while True:
             clear_screen()
             print("=== MAIN MENU ===")
-            
-            # Show current game setup status
             players = self.db.get_players_with_status()
-            murderer_count = self.check_murderer_count()
-            accomplice_count = 1 if self.accomplice_id else 0
+            completed_count = sum(1 for _, _, completed in players if completed)
             
-            # Show warnings if all players completed
-            if all(completed for _, _, completed in players):
-                if murderer_count != 2:
-                    print("\nWARNING: Need exactly 2 murderers!")
-                if accomplice_count > 1:
-                    print("WARNING: More than 1 accomplice selected!")
-                elif accomplice_count < 1:
-                    print("WARNING: No accomplice selected!")
+            print(f"Players: {completed_count}/8 | State: {self.game_state} | Act: {self.current_act}")
             
             print("\n1. Player Login")
             print("2. Host Menu")
@@ -589,7 +652,10 @@ class ClueGameApp:
             print("5. Exit")
             
             choice = input("\nSelect an option: ").strip()
-            
+            print("3. Accomplice Login")
+            print("4. Murderer Login")
+            print("5. Exit")
+
             if choice == '1':
                 self.player_login()
             elif choice == '2':

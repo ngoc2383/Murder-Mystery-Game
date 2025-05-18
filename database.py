@@ -349,6 +349,7 @@ class ClueData:
     @contextmanager
     def cursor(self):
         conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row  # Enable dictionary-style access
         cursor = conn.cursor()
         try:
             yield cursor
@@ -362,6 +363,7 @@ class ClueData:
     def _initialize_db(self):
         """Initialize database tables"""
         with self.cursor() as c:
+            # Create tables if they don't exist
             c.execute('''
                 CREATE TABLE IF NOT EXISTS players (
                     id INTEGER PRIMARY KEY,
@@ -385,6 +387,29 @@ class ClueData:
                     UNIQUE(character_id, set_number, act, clue_number)
                 )
             ''')
+            
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS game_clues (
+                    act INTEGER PRIMARY KEY,
+                    clue1 TEXT NOT NULL,
+                    clue2 TEXT NOT NULL,
+                    clue3 TEXT NOT NULL
+                )
+            ''')
+
+            # Check if is_accomplice column exists (alternative method)
+            c.execute('''
+                SELECT name FROM pragma_table_info('players') 
+                WHERE name='is_accomplice'
+            ''')
+            if not c.fetchone():
+                c.execute('ALTER TABLE players ADD COLUMN is_accomplice INTEGER DEFAULT 0')
+
+    def commit(self):
+        """Commit changes to the database"""
+        conn = sqlite3.connect(self.db_path)
+        conn.commit()
+        conn.close()
 
     def _seed_characters(self):
         """Initialize the 8 core characters"""
@@ -441,6 +466,7 @@ class ClueData:
             count = c.fetchone()[0]
             if count != 216:
                 raise ValueError(f"Expected 216 clues, only inserted {count}")
+    
     # Player methods remain the same
     def get_players_with_status(self):
         with self.cursor() as c:
