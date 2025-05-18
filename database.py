@@ -467,7 +467,6 @@ class ClueData:
             if count != 216:
                 raise ValueError(f"Expected 216 clues, only inserted {count}")
     
-    # Player methods remain the same
     def get_players_with_status(self):
         with self.cursor() as c:
             c.execute('SELECT id, name, has_completed FROM players ORDER BY id')

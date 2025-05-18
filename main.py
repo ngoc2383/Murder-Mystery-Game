@@ -14,7 +14,15 @@ class ClueGameApp:
         self.accomplice_id = None
         self.current_act = 1
         self.game_state = "WAITING"
-
+        
+        # Load accomplice state from database
+        with self.db.cursor() as c:
+            c.execute('SELECT id, password FROM players WHERE is_accomplice=1')
+            result = c.fetchone()
+            if result:
+                self.accomplice_id = result['id']
+                self.accomplice_password = result['password']
+   
     def authenticate(self, prompt, password=None):
         clear_screen()
         print(f"=== {prompt.upper()} ===")
@@ -131,27 +139,30 @@ class ClueGameApp:
 
     def setup_accomplice(self, player_id: int, player_name: str):
         """Set up an accomplice with a password"""
-        self.accomplice_id = player_id
-        
-        # Update database
         with self.db.cursor() as c:
-            # First clear any existing accomplice
-            c.execute('UPDATE players SET is_accomplice=0')
+            # Clear any existing accomplice
+            c.execute('UPDATE players SET is_accomplice=0, is_murderer=0 WHERE is_accomplice=1')
+            
             # Set new accomplice
-            c.execute('UPDATE players SET is_accomplice=1 WHERE id=?', (player_id,))
-        self.db.commit()
-        
-        print("\nAs an accomplice, create a password to view murderers:")
+            c.execute('''
+                UPDATE players 
+                SET is_accomplice=1, is_murderer=0, has_completed=1 
+                WHERE id=?
+            ''', (player_id,))
+            
+        print("\nAs an accomplice, create a password:")
         while True:
-            password = self.authenticate("CREATE PASSWORD")
+            password = getpass.getpass("Password (min 4 chars): ")
             if len(password) >= 4:
                 if self.confirm_action(f"Confirm password '{password}' is correct?"):
+                    with self.db.cursor() as c:
+                        c.execute('UPDATE players SET password=? WHERE id=?', (password, player_id))
+                    self.accomplice_id = player_id
                     self.accomplice_password = password
                     break
             print("Password must be at least 4 characters")
         
-        self.db.mark_player_completed(player_id)
-        print(f"\nThank you {player_name}. Remember your password!")
+        print(f"\n{player_name} registered as accomplice!")
         input("Press Enter to continue...")
     
     def murderer_login(self):
@@ -312,47 +323,54 @@ class ClueGameApp:
             clear_screen()
             print(f"=== ROLE SELECTION ({player_name}) ===")
             print("1. Innocent")
-            print("2. Murderer")
+            print("2. Murderer") 
             print("3. Accomplice")
             
             choice = input("Select role: ").strip()
             
             if choice == "1":
-                self.db.set_murderer_status(player_id, False)
-                self.db.mark_player_completed(player_id)
+                with self.db.cursor() as c:
+                    c.execute('''
+                        UPDATE players 
+                        SET is_murderer=0, is_accomplice=0, has_completed=1
+                        WHERE id=?
+                    ''', (player_id,))
                 print(f"\n{player_name} registered as innocent.")
                 input("Press Enter to continue...")
                 break
-            
+                
             elif choice == "2":
-                '''
-                # Only check murderer count if we're setting a new murderer
-                if self.check_murderer_count() >= 2:
-                    print(f"\n{player_name} cannot be a murderer.")
-                    print("Maximum 2 murderers already selected.")
-                    print("Please choose another role.")
+                if self.accomplice_id == player_id:
+                    print("\nCannot be both murderer and accomplice!")
                     input("Press Enter to continue...")
                     continue
-                '''
+                    
                 if self.confirm_action(f"Confirm {player_name} is a murderer?"):
+                    with self.db.cursor() as c:
+                        c.execute('''
+                            UPDATE players 
+                            SET is_murderer=1, is_accomplice=0, has_completed=1
+                            WHERE id=?
+                        ''', (player_id,))
                     self.setup_murderer(player_id, player_name)
                     break
-            
+                    
             elif choice == "3":
-                if self.accomplice_id:
-                    print("\nAn accomplice has already been selected!")
-                    print("Please choose another role.")
-                    input("Press Enter to continue...")
-                    continue
-                
+                with self.db.cursor() as c:
+                    c.execute('SELECT is_murderer FROM players WHERE id=?', (player_id,))
+                    if c.fetchone()[0] == 1:
+                        print("\nCannot be both murderer and accomplice!")
+                        input("Press Enter to continue...")
+                        continue
+                        
                 if self.confirm_action(f"Confirm {player_name} is the accomplice?"):
                     self.setup_accomplice(player_id, player_name)
                     break
-            
+                    
             else:
                 print("Invalid choice")
                 input("Press Enter to continue...")
-
+   
     def check_roles_setup(self):
         """Verify roles are properly assigned (only called once)"""
         clear_screen()
@@ -609,32 +627,78 @@ class ClueGameApp:
         
         while True:
             clear_screen()
-            print("=== HOST MENU ===")
-            print(f"Game State: {self.game_state} | Current Act: {self.current_act}")
+            print("=== HOST MENU ===\n")
+            print(f"Game State: {self.game_state} | Current Act: {self.current_act}\n")
             print("1. Reveal Current Act Clues")
             print("2. View Murderers")
             print("3. View Accomplice")
             print("4. Reset Options")
             print("5. Advance Act")
-            print("6. Back to Main Menu")
+            print("6. Restart Game (COMPLETE RESET)")
+            print("7. Back to Main Menu")
             
-            choice = input("Select an option: ").strip()
+            choice = input("\nSelect an option: ").strip()
             
             if choice == '1':
-                self.display_act_clues(self.current_act)
+                if self.authenticate("HOST VERIFICATION", self.host_password):
+                    self.display_act_clues(self.current_act)
             elif choice == '2':
-                self.view_murderers_host()
+                if self.authenticate("HOST VERIFICATION", self.host_password):
+                    self.view_murderers_host()
             elif choice == '3':
-                self.view_accomplice()
+                if self.authenticate("HOST VERIFICATION", self.host_password):
+                    self.view_accomplice()
             elif choice == '4':
                 self.reset_options()
             elif choice == '5':
-                self.advance_act()  # No state check needed
+                if self.authenticate("HOST VERIFICATION", self.host_password):
+                    self.advance_act()
             elif choice == '6':
+                if self.authenticate("HOST VERIFICATION", self.host_password):
+                    self.restart_game()
+            elif choice == '7':
                 return
             else:
                 print("Invalid choice. Please try again.")
-                input("Press Enter to continue...")  
+                input("Press Enter to continue...")
+   
+    def restart_game(self):
+        """Completely reset all game data and tables"""
+        if not self.authenticate("HOST VERIFICATION", self.host_password):
+            print("Invalid host password!")
+            input("Press Enter to continue...")
+            return
+        
+        if not self.confirm_action("WARNING: This will ERASE ALL GAME DATA. Continue?"):
+            print("Game reset cancelled.")
+            input("Press Enter to continue...")
+            return
+        
+        try:
+            with self.db.cursor() as c:
+                # Drop and recreate all tables
+                c.execute('DROP TABLE IF EXISTS players')
+                c.execute('DROP TABLE IF EXISTS clues')
+                c.execute('DROP TABLE IF EXISTS game_clues')
+                
+                # Reinitialize database
+                self.db._initialize_db()
+                self.db._seed_characters()
+                self.db._seed_clues()
+                
+                # Reset all game state
+                self.murderer_passwords = {}
+                self.accomplice_password = None
+                self.accomplice_id = None
+                self.current_act = 1
+                self.game_state = "WAITING"
+                
+            print("\nGame completely reset! All data erased.")
+            print("New game ready to be set up.")
+        except Exception as e:
+            print(f"\nError resetting game: {str(e)}")
+        
+        input("Press Enter to continue...")   
     
     def main_menu(self):
         while True:
