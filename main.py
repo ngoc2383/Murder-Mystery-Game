@@ -51,47 +51,53 @@ class ClueGameApp:
                 print("Please answer 'yes' or 'no'")
 
     def accomplice_login(self):
+        """Handle accomplice login without revealing roles"""
         clear_screen()
         print("=== ACCOMPLICE LOGIN ===")
         
-        # Verify accomplice exists
-        if not self.accomplice_id:
-            print("No accomplice has been set up yet!")
-            input("Press Enter to continue...")
-            return
+        # Show all characters regardless of role
+        players = self.db.get_players_with_status()
         
-        # Get accomplice name
-        with self.db.cursor() as c:
-            c.execute('SELECT name FROM players WHERE id=?', (self.accomplice_id,))
-            name = c.fetchone()[0]
+        print("\nCharacters:")
+        for idx, (player_id, name, _) in enumerate(players, 1):
+            print(f"{idx}. {name}")
         
-        # Password verification
-        password = getpass.getpass(f"{name}, enter your accomplice password: ")
-        if password != self.accomplice_password:
-            print("Incorrect password!")
-            input("Press Enter to continue...")
-            return
-        
-        # Show accomplice menu
-        while True:
-            clear_screen()
-            print(f"=== ACCOMPLICE MENU ({name}) ===")
-            print("1. View Murderers")
-            print("2. View Special Clues")
-            print("3. Return to Main Menu")
-            
-            choice = input("Select an option: ").strip()
-            
-            if choice == '1':
-                self.view_murderers_accomplice()
-            elif choice == '2':
-                self.view_accomplice_clues()
-            elif choice == '3':
-                return
+        try:
+            choice = int(input("\nSelect your character: ")) - 1
+            if 0 <= choice < len(players):
+                player_id, name, _ = players[choice]
+                
+                # Verify this character is actually the accomplice
+                with self.db.cursor() as c:
+                    c.execute('SELECT is_accomplice FROM players WHERE id=?', (player_id,))
+                    is_accomplice = c.fetchone()[0]
+                
+                '''
+                if not is_accomplice:
+                    print("This character is not the accomplice!")
+                    input("Press Enter to continue...")
+                    return
+                '''
+                password = getpass.getpass(f"{name}, enter your password: ")
+                
+                # Verify password
+                with self.db.cursor() as c:
+                    c.execute('SELECT password FROM players WHERE id=?', (player_id,))
+                    result = c.fetchone()
+                    if not result or result[0] != password:
+                        print("Incorrect password or character!")
+                        input("Press Enter to continue...")
+                        return
+                
+                print(f"\nWelcome back, {name}!")
+                self.accomplice_menu(name)
             else:
-                print("Invalid choice")
-                input("Press Enter to continue...")
-
+                print("Invalid selection!")
+        except ValueError:
+            print("Please enter a valid number")
+        
+        input("Press Enter to continue...")
+    
     def setup_murderer(self, player_id, player_name):
         """Set up murderer with password"""
         # Set murderer status
@@ -135,40 +141,47 @@ class ClueGameApp:
                 print("Password must be at least 4 characters")
 
     def murderer_login(self):
-        """Handle murderer login"""
+        """Handle murderer login without revealing roles"""
         clear_screen()
         print("=== MURDERER LOGIN ===")
         
-        # Get murderer players
-        with self.db.cursor() as c:
-            c.execute('SELECT id, name FROM players WHERE is_murderer=1')
-            murderers = c.fetchall()
+        # Show all characters regardless of role
+        players = self.db.get_players_with_status()
         
-        if not murderers:
-            print("No murderers registered yet!")
-            input("Press Enter to continue...")
-            return
-        
-        print("\nMurderer characters:")
-        for i, (player_id, name) in enumerate(murderers, 1):
-            print(f"{i}. {name}")
+        print("\nCharacters:")
+        for idx, (player_id, name, _) in enumerate(players, 1):
+            print(f"{idx}. {name}")
         
         try:
             choice = int(input("\nSelect your character: ")) - 1
-            if 0 <= choice < len(murderers):
-                player_id, name = murderers[choice]
+            if 0 <= choice < len(players):
+                player_id, name, _ = players[choice]
+                
+                # Verify this character is actually a murderer
+                with self.db.cursor() as c:
+                    c.execute('SELECT is_murderer FROM players WHERE id=?', (player_id,))
+                    is_murderer = c.fetchone()[0]
+                
+                '''
+                if not is_murderer:
+                    print("This character is not a murderer!")
+                    input("Press Enter to continue...")
+                    return
+                '''
+
                 password = getpass.getpass(f"{name}, enter your password: ")
                 
                 # Verify password
                 with self.db.cursor() as c:
                     c.execute('SELECT password FROM players WHERE id=?', (player_id,))
-                    stored_password = c.fetchone()[0]
+                    result = c.fetchone()
+                    if not result or result[0] != password:
+                        print("Incorrect password or character!")
+                        input("Press Enter to continue...")
+                        return
                 
-                if password == stored_password:
-                    print(f"\nWelcome back, {name}!")
-                    self.murderer_menu(player_id, name)
-                else:
-                    print("Incorrect password!")
+                print(f"\nWelcome back, {name}!")
+                self.murderer_menu(player_id, name)
             else:
                 print("Invalid selection!")
         except ValueError:
@@ -377,24 +390,6 @@ class ClueGameApp:
             
             return clues
 
-    def select_clues_for_act(self, act):
-        """Select 3 clues for specified act using weighted random selection"""
-        weighted_clues = self.get_weighted_clues(act)
-        
-        if not weighted_clues:
-            return []
-        
-        # Extract clues and weights separately
-        clues, weights = zip(*weighted_clues)
-        
-        # Select 3 unique clues with weighted probability
-        selected = random.choices(
-            population=clues,
-            weights=weights,
-            k=min(3, len(clues)))
-        
-        return list(set(selected))  # Remove duplicates if any
-
     def reveal_act_clues(self):
         """Host interface for revealing clues for current act"""
         clear_screen()
@@ -409,27 +404,56 @@ class ClueGameApp:
             return
         
         print("\nSelected clues for this act:")
-        for i, clue in enumerate(clues, 1):
-            print(f"{i}. {clue}")
+        for i, clue in enumerate(clues[:3], 1):  # Ensure exactly 3 clues
+            # Clean up clue display by removing set info
+            clean_clue = clue.split(' - Act ')[0]  # Just show character and clue
+            print(f"{i}. {clean_clue}")
         
-        # Show which characters these clues came from
+        # Show which characters these clues came from (without set info)
         print("\nClue origins:")
         with self.db.cursor() as c:
-            for clue in clues:
+            for clue in clues[:3]:
+                # Extract base clue info for lookup
+                base_clue = clue.split(' - Act')[0]
                 c.execute('''
                     SELECT p.name 
                     FROM clues c
                     JOIN players p ON c.character_id = p.id
-                    WHERE c.description = ? 
-                    AND c.set_number = p.has_completed
+                    WHERE c.description LIKE ? 
+                    AND c.act = ?
                     LIMIT 1
-                ''', (clue,))
+                ''', (f"{base_clue}%", self.current_act))
                 result = c.fetchone()
                 if result:
-                    print(f"- '{clue[:30]}...' from {result[0]}'s set")
+                    print(f"- From {result[0]}'s clues")
         
         input("\nPress Enter to continue...")
 
+    def select_clues_for_act(self, act):
+        """Select 3 clues for specified act using weighted random selection"""
+        weighted_clues = self.get_weighted_clues(act)
+        
+        if not weighted_clues:
+            return []
+        
+        # Extract clues and weights
+        clues, weights = zip(*weighted_clues)
+        
+        # Select 3 unique clues with weighted probability
+        selected = []
+        while len(selected) < 3 and len(clues) > 0:
+            # Get one random clue
+            new_clue = random.choices(clues, weights=weights, k=1)[0]
+            
+            # Add if not already selected
+            if new_clue not in selected:
+                selected.append(new_clue)
+            
+            # Prevent infinite loops if not enough unique clues
+            if len(selected) == len(clues):
+                break
+        
+        return selected[:3]  # Return exactly 3 clues
     def advance_act(self):
         """Move to the next act"""
         if self.current_act < 3:
