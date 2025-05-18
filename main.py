@@ -700,26 +700,279 @@ class ClueGameApp:
         
         input("Press Enter to continue...")   
     
+    def accomplice_menu(self, name: str):
+        """Special menu for the accomplice with weighted clues"""
+        while True:
+            clear_screen()
+            print(f"=== ACCOMPLICE MENU ({name}) ===")
+            print("1. View Special Clues")
+            print("2. View My Character Info")
+            print("3. Return to Main Menu")
+            
+            choice = input("Select an option: ").strip()
+            
+            if choice == '1':
+                self.view_accomplice_clues_weighted()
+            elif choice == '2':
+                self.view_accomplice_info()
+            elif choice == '3':
+                return
+            else:
+                print("Invalid choice")
+                input("Press Enter to continue...")
+
+    def _get_weighted_accomplice_clues(self, act: int) -> List[Tuple[str, int]]:
+        """Get the same 3 game clues but with reliability ratings"""
+        with self.db.cursor() as c:
+            # Get the standard 3 game clues for this act
+            c.execute('SELECT clue1, clue2, clue3 FROM game_clues WHERE act=?', (act,))
+            game_clues = c.fetchone()
+            
+            if not game_clues:
+                return []
+                
+            # Get reliability weights for each clue
+            weighted_clues = []
+            for clue in [game_clues['clue1'], game_clues['clue2'], game_clues['clue3']]:
+                # Extract character name from clue string (format: "Name - Clue - Act X - Set Y")
+                try:
+                    character_name = clue.split(' - ')[0].strip()
+                except:
+                    # Fallback if clue format is different
+                    weighted_clues.append((clue, 1))  # Default weight
+                    continue
+                    
+                # Get weight for this character's clue
+                c.execute('''
+                    SELECT 
+                        CASE 
+                            WHEN is_murderer=1 THEN 3  -- Highest weight for murderers
+                            WHEN id=? THEN 2           -- Medium weight for accomplice's own clues
+                            ELSE 1                     -- Low weight for others
+                        END as weight
+                    FROM players 
+                    WHERE name=?
+                ''', (self.accomplice_id, character_name))
+                
+                result = c.fetchone()
+                weight = result['weight'] if result else 1
+                weighted_clues.append((clue, weight))
+                
+            return weighted_clues
+  
+    def view_accomplice_clues_weighted(self):
+        """Show standard 3 game clues with reliability ratings"""
+        clear_screen()
+        print(f"=== YOUR SPECIAL CLUES (ACT {self.current_act}) ===")
+        
+        clues = self._get_weighted_accomplice_clues(self.current_act)
+        
+        if not clues:
+            print("\nNo clues available for current act!")
+            input("Press Enter to continue...")
+            return
+        
+        print("\nThe same clues everyone sees, but you know which might be trustworthy:")
+        for i, (clue, weight) in enumerate(clues, 1):
+            print(f"\n{i}. {clue}")
+            print(f"   Reliability: {'★' * weight}{'☆' * (3-weight)}")
+        
+        print("\nRemember: Even highly-rated clues might be misleading!")
+        input("\nPress Enter to continue...") 
+    
+    def view_accomplice_info(self):
+        """Show the accomplice's character information"""
+        clear_screen()
+        print(f"=== YOUR CHARACTER INFO ===")
+        
+        with self.db.cursor() as c:
+            # Get character details
+            c.execute('''
+                SELECT name, password, is_accomplice
+                FROM players 
+                WHERE id=?
+            ''', (self.accomplice_id,))
+            result = c.fetchone()
+            
+        if result:
+            print(f"\nCharacter Name: {result['name']}")
+            print(f"Your Password: {result['password']}")
+            print(f"Role: {'Accomplice' if result['is_accomplice'] else 'Unknown'}")
+            print("\nRemember:")
+            print("- You see reliability ratings on clues")
+            print("- You don't know the murderers' identities")
+            print("- Your clues may be more reliable than others")
+        else:
+            print("\nError: Character information not found!")
+        
+        input("\nPress Enter to continue...")
+
+    def view_character_descriptions(self):
+        """Show descriptions for all characters"""
+        character_descriptions = {
+            1: {
+                'name': 'Vivienne VanDerBloom',
+                'role_hint': 'Elegant socialite with secrets',
+                'description': (
+                    "- Emphasize how devastated you are, but also that the party must go on.\n"
+                    "- Constantly hint that everyone wants your money or status.\n"
+                    "- Deny any involvement in the host’s drama — claim they were jealous of your fame."
+                ),
+                'how_to_play': (
+                    "- Be graceful, dramatic, and always slightly superior.\n"
+                    "- Use passive-aggressive jabs, especially toward Bianca.\n"
+                    "- If accused, respond with flair — like you're too fabulous to be guilty."
+                )
+            },
+            2: {
+                'name': 'Casey Penwright',
+                'role_hint': 'Ambitious journalist',
+                'description': (
+                    "- Ask lots of probing questions to deflect suspicion.\n"
+                    "- Claim the host was working on a big exposé — but not about you.\n"
+                    "- Improvise “scoops” or facts about other characters."
+                ),
+                'how_to_play': (
+                    "- Act like you're constantly investigating a story.\n"
+                    "- Stay curious and sly — like you're uncovering the truth.\n"
+                    "- Use the line: “I write stories. I don’t star in them.” when under pressure."
+                )
+            },
+            3: {
+                'name': 'Bianca Cross',
+                'role_hint': 'Mysterious artist',
+                'description': (
+                    "- Remind everyone you deserved the inheritance.\n"
+                    "- Accuse others of jealousy, especially Sebastian and Harper.\n"
+                    "- Downplay a past fight with the host — act like it wasn’t serious."
+                ),
+                'how_to_play': (
+                    "- Be theatrical, sarcastic, and dramatic.\n"
+                    "- Roll your eyes at Vivienne and act superior.\n"
+                    "- Deflect suspicion with humor and flair — “Please. I’d never dirty my heels with crime.”"
+                )
+            },
+            4: {
+                'name': 'Sebastian Blackwell',
+                'role_hint': 'Wealthy businessman',
+                'description': (
+                    "- Mention your complicated history with the host, but say it’s personal.\n"
+                    "- Deny damaging any art — but be insulted that someone would suggest it.\n"
+                    "- Accuse Dante of being too physical to be innocent."
+                ),
+                'how_to_play': (
+                    "- Be mysterious, poetic, and intense — say things like “Pain inspires art.”\n"
+                    "- Randomly sketch people as if they inspire you.\n"
+                    "- Speak slowly, deliberately — like your every word is profound."
+                )
+            },
+            5: {
+                'name': 'Harper Quinn',
+                'role_hint': 'Skeptical psychologist',
+                'description': (
+                    "- Get moody and vague when talking about the host.\n"
+                    "- Be suspicious of Nico and mention their closeness to the host.\n"
+                    "- Say the host changed over time, and not for the better."
+                ),
+                'how_to_play': (
+                    "- Act introspective and emotionally torn.\n"
+                    "- Occasionally slip up — say something you shouldn't, then quickly backtrack.\n"
+                    "- Speak as if you’re trying to piece the truth together from memory."
+                )
+            },
+            6: {
+                'name': 'Dante Steele',
+                'role_hint': 'Charming gambler',
+                'description': (
+                    "- Mention how protective you were of the host until they stopped listening.\n"
+                    "- Say things like “I follow orders. I don’t make kills.”\n"
+                    "- Hint you know secrets — especially about Vivienne and Bianca."
+                ),
+                'how_to_play': (
+                    "- Be calm, confident, and a bit menacing.\n"
+                    "- Watch others closely like you're always reading them.\n"
+                    "- Stay mysterious — let others talk while you drop short, powerful lines."
+                )
+            },
+            7: {
+                'name': 'Nico Valentine',
+                'role_hint': 'Quiet bookkeeper',
+                'description': (
+                    "- Act heartbroken — or pretend to be — over the host.\n"
+                    "- Deny being obsessed, but react strongly if someone accuses you.\n"
+                    "- Drop vague comments about “bedroom secrets.”"
+                ),
+                'how_to_play': (
+                    "- Flirt with others, but keep your sadness close to the surface.\n"
+                    "- Cry once (or fake it), then say, “I can’t talk about us… it’s too raw.”\n"
+                    "- Be defensive, emotional, and secretive."
+                )
+            },
+            8: {
+                'name': 'Mimi Butterfield',
+                'role_hint': 'Eccentric heiress',
+                'description': (
+                    "- Complain about not getting paid by the host.\n"
+                    "- Say you saw something while restocking the shrimp.\n"
+                    "- Make food puns like “Someone got roasted tonight.”"
+                ),
+                'how_to_play': (
+                    "- Be quirky, nosy, and unpredictable.\n"
+                    "- Hand out food like you’re bribing people.\n"
+                    "- Laugh off drama and gossip with sass — “Ugh, rich people problems.”"
+                )
+            }
+        }
+
+        while True:
+            clear_screen()
+            print("=== CHARACTER DESCRIPTIONS ===")
+            
+            # List all characters
+            for char_id, info in character_descriptions.items():
+                print(f"\n{char_id}. {info['name']} - {info['role_hint']}")
+            
+            print("\nSelect a character to view details (1-8)")
+            print("or enter 'back' to return to main menu")
+            
+            choice = input("\nYour choice: ").strip().lower()
+            
+            if choice == 'back':
+                return
+            try:
+                char_id = int(choice)
+                if 1 <= char_id <= 8:
+                    self._show_character_details(character_descriptions[char_id])
+                else:
+                    print("Please enter 1-8 or 'back'")
+            except ValueError:
+                print("Please enter a valid number or 'back'")
+            
+            input("\nPress Enter to continue...")
+
+    def _show_character_details(self, character_info):
+        """Show detailed description for one character"""
+        clear_screen()
+        print(f"=== {character_info['name'].upper()} ===")
+        print(f"\nRole Hint: {character_info['role_hint']}")
+        print("\nDescription:")
+        print(character_info['description'])
+        print(f"\nHow To Act:\n{character_info['how_to_play']}")
+   
     def main_menu(self):
         while True:
             clear_screen()
             print("=== MAIN MENU ===")
-            players = self.db.get_players_with_status()
-            completed_count = sum(1 for _, _, completed in players if completed)
-            
-            print(f"Players: {completed_count}/8 | State: {self.game_state} | Act: {self.current_act}")
-            
+            print(f"Game State: {self.game_state} | Current Act: {self.current_act}")
             print("\n1. Player Login")
             print("2. Host Menu")
             print("3. Accomplice Login")
             print("4. Murderer Login")
-            print("5. Exit")
+            print("5. View Character Descriptions")  # New option
+            print("6. Exit")
             
             choice = input("\nSelect an option: ").strip()
-            print("3. Accomplice Login")
-            print("4. Murderer Login")
-            print("5. Exit")
-
+            
             if choice == '1':
                 self.player_login()
             elif choice == '2':
@@ -729,6 +982,8 @@ class ClueGameApp:
             elif choice == '4':
                 self.murderer_login()
             elif choice == '5':
+                self.view_character_descriptions()  # New function
+            elif choice == '6':
                 if self.confirm_action("Are you sure you want to exit?"):
                     print("Goodbye!")
                     sys.exit()
