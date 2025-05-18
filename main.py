@@ -494,14 +494,14 @@ class ClueGameApp:
             
             # Show current game setup status
             players = self.db.get_players_with_status()
-            completed_count = sum(1 for _, _, completed in players if completed)
+            #completed_count = sum(1 for _, _, completed in players if completed)
             murderer_count = self.check_murderer_count()
             accomplice_count = 1 if self.accomplice_id else 0
-            
+            '''
             print(f"\nPlayers completed: {completed_count}/8")
             print(f"Murderers selected: {murderer_count}/2")
             print(f"Accomplice selected: {accomplice_count}/1")
-            
+            '''
             # Show warnings if all players completed
             if all(completed for _, _, completed in players):
                 if murderer_count != 2:
@@ -514,7 +514,8 @@ class ClueGameApp:
             print("\n1. Player Login")
             print("2. Host Menu")
             print("3. Accomplice Login")
-            print("4. Exit")
+            print("4. Murderer Login")
+            print("5. Exit")
             
             choice = input("\nSelect an option: ").strip()
             
@@ -525,6 +526,8 @@ class ClueGameApp:
             elif choice == '3':
                 self.accomplice_login()
             elif choice == '4':
+                self.view_murderer_collaboration()
+            elif choice == '5':
                 if self.confirm_action("Are you sure you want to exit?"):
                     print("Goodbye!")
                     sys.exit()

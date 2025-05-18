@@ -572,7 +572,7 @@ class ClueData:
                         UNIQUE(character_id, set_number)
                         )''')
             
-            # Clues table
+            # Clues table - modified to match our insert operations
             c.execute('''CREATE TABLE IF NOT EXISTS clues (
                         id INTEGER PRIMARY KEY,
                         set_id INTEGER NOT NULL,
@@ -602,7 +602,7 @@ class ClueData:
                         set_id = c.lastrowid
                         
                         # Insert all clues for this set
-                        for act in range(1, 4):
+                        for act in range(1, 4):  # Acts 1-3
                             for clue in clues[(act-1)*3 : act*3]:  # Get 3 clues per act
                                 label, desc = clue
                                 c.execute('''INSERT INTO clues 
