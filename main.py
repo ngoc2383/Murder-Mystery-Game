@@ -447,7 +447,9 @@ class ClueGameApp:
                     c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
                     co_murderer_id = c.fetchone()[0]
                     self._generate_all_murder_clues(murderer_id, co_murderer_id)
-            
+                    if not self._game_clues_exist():  # Only initialize if needed
+                        self._select_final_clues_for_acts()
+                        print("\nGame clues initialized!")
             print("Murderer intel regenerated for all acts!")
             self.db.save_game_state(self.current_act, self.game_state)
         else:
@@ -618,7 +620,6 @@ class ClueGameApp:
         clear_screen()
         print("=== ROLES VERIFICATION ===")
         
-        # Proper accomplice verification
         with self.db.cursor() as c:
             c.execute('SELECT id FROM players WHERE is_accomplice=1')
             accomplice = c.fetchone()
@@ -627,22 +628,36 @@ class ClueGameApp:
         murderer_count = self.check_murderer_count()
         accomplice_count = 1 if self.accomplice_id else 0
         
+        print(f"DEBUG: Found {murderer_count} murderers and {accomplice_count} accomplice")  # Debug
+        
         if murderer_count == 2 and accomplice_count == 1:
             print("\nAll roles properly assigned!")
             self.game_state = "READY"
             
-            # Force regenerate all murder clues
             with self.db.cursor() as c:
                 c.execute('SELECT id FROM players WHERE is_murderer=1')
                 murderers = [row[0] for row in c.fetchall()]
+                print(f"DEBUG: Murderer IDs: {murderers}")  # Debug
                 
                 for murderer_id in murderers:
                     c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
-                    co_murderer_id = c.fetchone()[0]
+                    co_murderer = c.fetchone()
+                    if not co_murderer:  # Safety check
+                        print(f"ERROR: No co-murderer found for murderer {murderer_id}")
+                        continue
+                    co_murderer_id = co_murderer[0]
+                    print(f"DEBUG: Generating clues for murderer {murderer_id} with partner {co_murderer_id}")  # Debug
                     self._generate_all_murder_clues(murderer_id, co_murderer_id)
             
-            print("Murderer intel regenerated for all acts!")
+            print("DEBUG: Attempting to save game state")  # Debug
             self.db.save_game_state(self.current_act, self.game_state)
+            print("Murderer intel regenerated for all acts!")
+            
+            # Verify clues were actually created
+            with self.db.cursor() as c:
+                c.execute('SELECT COUNT(*) FROM murder_clues')
+                clue_count = c.fetchone()[0]
+                print(f"DEBUG: Total murder clues in database: {clue_count}")  # Debug
         else:
             print("\nWARNING: Role setup incomplete!")
             print(f"- Murderers: {murderer_count}/2")
@@ -719,8 +734,7 @@ class ClueGameApp:
             elif choice == '4':
                 self.reset_options()
             elif choice == '5':
-                if self.authenticate("HOST VERIFICATION", self.host_password):
-                    self.advance_act()
+                self.advance_act()
             elif choice == '6':
                 if self.authenticate("HOST VERIFICATION", self.host_password):
                     self.restart_game()
@@ -731,7 +745,7 @@ class ClueGameApp:
                 input("Press Enter to continue...")
    
     def restart_game(self):
-        """Completely reset all game data and tables including murder_clues"""
+        """Completely reset all game data and state including murder_clues and game_state"""
         if not self.authenticate("HOST VERIFICATION", self.host_password):
             print("Invalid host password!")
             input("Press Enter to continue...")
@@ -744,18 +758,19 @@ class ClueGameApp:
         
         try:
             with self.db.cursor() as c:
-                # Drop all game tables including murder_clues
+                # Drop all game tables
                 c.execute('DROP TABLE IF EXISTS players')
                 c.execute('DROP TABLE IF EXISTS clues')
                 c.execute('DROP TABLE IF EXISTS game_clues')
-                c.execute('DROP TABLE IF EXISTS murder_clues')  # New line
-                
+                c.execute('DROP TABLE IF EXISTS murder_clues')
+                c.execute('DROP TABLE IF EXISTS game_state')
+
                 # Reinitialize database
                 self.db._initialize_db()
                 self.db._seed_characters()
                 self.db._seed_clues()
                 
-                # Recreate murder_clues table structure
+                # Recreate special tables with proper structure
                 c.execute('''
                     CREATE TABLE IF NOT EXISTS murder_clues (
                         murderer_id INTEGER,
@@ -766,7 +781,21 @@ class ClueGameApp:
                     )
                 ''')
                 
-                # Reset all game state
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS game_state (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        current_act INTEGER DEFAULT 1,
+                        game_status TEXT DEFAULT 'WAITING'
+                    )
+                ''')
+                
+                # Initialize game_state with default values
+                c.execute('''
+                    INSERT INTO game_state (id, current_act, game_status)
+                    VALUES (1, 1, 'WAITING')
+                ''')
+                
+                # Reset all in-memory state
                 self.murderer_passwords = {}
                 self.accomplice_password = None
                 self.accomplice_id = None
@@ -775,9 +804,11 @@ class ClueGameApp:
                 
             print("\nGame completely reset! All data erased.")
             print("New game ready to be set up.")
+            print(f"Current state: Act {self.current_act}, Status: {self.game_state}")
+            
         except Exception as e:
             print(f"\nError resetting game: {str(e)}")
-            # Ensure tables exist even if error occurs
+            # Emergency recovery - ensure critical tables exist
             with self.db.cursor() as c:
                 c.execute('''
                     CREATE TABLE IF NOT EXISTS murder_clues (
@@ -788,7 +819,19 @@ class ClueGameApp:
                         PRIMARY KEY (murderer_id, act, clue_text)
                     )
                 ''')
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS game_state (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        current_act INTEGER DEFAULT 1,
+                        game_status TEXT DEFAULT 'WAITING'
+                    )
+                ''')
+                # Ensure at least one row exists
+                c.execute('SELECT COUNT(*) FROM game_state')
+                if c.fetchone()[0] == 0:
+                    c.execute('INSERT INTO game_state VALUES (1, 1, "WAITING")')
             self.db.commit()
+            print("Recovery complete - basic tables recreated")
         
         input("Press Enter to continue...")
     
@@ -1106,34 +1149,39 @@ class ClueGameApp:
             input("Press Enter to continue...")
     
     def _generate_all_murder_clues(self, murderer_id, co_murderer_id):
-        """Generate complete set of murder clues"""
-        with self.db.cursor() as c:
-            for act in range(1, 4):  # All 3 acts
-                # Get 2 reliable clues
-                c.execute('''
-                    SELECT description FROM clues 
-                    WHERE character_id=? AND act=?
-                    ORDER BY RANDOM() LIMIT 2
-                ''', (co_murderer_id, act))
-                reliable = [(row[0], 1) for row in c.fetchall()]
-                
-                # Get 1 unreliable clue
-                c.execute('''
-                    SELECT description FROM clues
-                    WHERE character_id NOT IN (?,?) AND act=?
-                    ORDER BY RANDOM() LIMIT 1
-                ''', (murderer_id, co_murderer_id, act))
-                unreliable = [(row[0], 0) for row in c.fetchall()]
-                
-                # Store all
-                for clue, reliable in reliable + unreliable:
+        """Generate complete set of murder clues with explicit commit"""
+        try:
+            with self.db.cursor() as c:
+                for act in range(1, 4):
+                    # Get 2 reliable clues
                     c.execute('''
-                        INSERT OR REPLACE INTO murder_clues
-                        VALUES (?, ?, ?, ?)
-                    ''', (murderer_id, act, clue, reliable))
-        
-        self.db.commit()
- 
+                        SELECT description FROM clues 
+                        WHERE character_id=? AND act=?
+                        ORDER BY RANDOM() LIMIT 2
+                    ''', (co_murderer_id, act))
+                    reliable = [(row[0], 1) for row in c.fetchall()]
+                    
+                    # Get 1 unreliable clue
+                    c.execute('''
+                        SELECT description FROM clues
+                        WHERE character_id NOT IN (?,?) AND act=?
+                        ORDER BY RANDOM() LIMIT 1
+                    ''', (murderer_id, co_murderer_id, act))
+                    unreliable = [(row[0], 0) for row in c.fetchall()]
+                    
+                    # Store all
+                    for clue, reliable_flag in reliable + unreliable:
+                        c.execute('''
+                            INSERT OR REPLACE INTO murder_clues
+                            VALUES (?, ?, ?, ?)
+                        ''', (murderer_id, act, clue, reliable_flag))
+            
+            self.db.commit()  # Explicit commit
+            print(f"DEBUG: Successfully generated clues for murderer {murderer_id}")
+        except Exception as e:
+            print(f"ERROR: Failed to generate clues: {str(e)}")
+            self.db.rollback()
+   
     def _view_murderer_special_clues(self, murderer_id):
         """Show randomized special clues with 2:1 ratio, stored persistently"""
         clear_screen()
@@ -1237,3 +1285,7 @@ class ClueGameApp:
 if __name__ == "__main__":
     app = ClueGameApp()
     app.main_menu()
+
+# Everything working except game clues just not generate
+# The murder clues generate with the 2:1 ratio- it should NOT do that
+# It should do the same thing as the game clues generation algorithm
