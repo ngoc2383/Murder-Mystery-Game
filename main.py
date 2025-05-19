@@ -27,6 +27,8 @@ class ClueGameApp:
                 )
             ''')
         self.db.commit()
+
+        self.current_act, self.game_state = self.db.load_game_state()
    
     def authenticate(self, prompt, password=None):
         clear_screen()
@@ -377,33 +379,31 @@ class ClueGameApp:
                 input("Press Enter to continue...")
    
     def check_roles_setup(self):
-        """Verify roles are properly assigned (only called once)"""
+        """Verify roles and generate all murder clues when game becomes ready"""
         clear_screen()
         print("=== ROLES VERIFICATION ===")
         
         murderer_count = self.check_murderer_count()
         accomplice_count = 1 if self.accomplice_id else 0
         
-        issues_found = False
-        
-        if murderer_count != 2:
-            print(f"\nWARNING: {murderer_count} murderer(s) selected (need exactly 2)!")
-            issues_found = True
-        
-        if accomplice_count != 1:
-            print(f"\nWARNING: {accomplice_count} accomplice(s) selected (need exactly 1)!")
-            issues_found = True
-        
-        if not issues_found:
+        if murderer_count == 2 and accomplice_count == 1:
             print("\nAll roles properly assigned!")
-            print("- 2 murderers selected")
-            print("- 1 accomplice selected")
             self.game_state = "READY"
-            # Initialize game clues only once
-            self._select_final_clues_for_acts()
-            print("\nGame clues have been initialized!")
+            
+            # Generate ALL murder clues (acts 1-3) upfront
+            with self.db.cursor() as c:
+                c.execute('SELECT id FROM players WHERE is_murderer=1')
+                murderers = [row[0] for row in c.fetchall()]
+                
+                for murderer_id in murderers:
+                    c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
+                    co_murderer_id = c.fetchone()[0]
+                    self._generate_all_murder_clues(murderer_id, co_murderer_id)
+            
+            print("Murderer intel has been prepared for all acts!")
+            self.db.save_game_state(self.current_act, self.game_state)
         else:
-            print("\nRole setup incomplete!")
+            print("\nWARNING: Role setup incomplete!")
         
         input("\nPress Enter to continue...")
     
@@ -517,26 +517,15 @@ class ClueGameApp:
         input("\nPress Enter to continue...")
     
     def advance_act(self):
-        """Advance to next act and generate murder clues"""
+        """Simply advance act since clues are pre-generated"""
         if self.current_act >= 3:
-            print("\nGame completed! All acts finished.")
             self.game_state = "COMPLETED"
+            print("\nGame completed! All acts finished.")
         else:
             self.current_act += 1
-            
-            # Generate murder clues for new act
-            with self.db.cursor() as c:
-                c.execute('SELECT id FROM players WHERE is_murderer=1')
-                murderers = [row[0] for row in c.fetchall()]
-                
-                for murderer_id in murderers:
-                    c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
-                    co_murderer_id = c.fetchone()[0]
-                    self._generate_murder_clues(murderer_id, co_murderer_id)
-            
             print(f"\nAdvanced to Act {self.current_act}!")
-            print("Murderer intel has been updated for the new act.")
         
+        self.db.save_game_state(self.current_act, self.game_state)
         input("Press Enter to continue...") 
    
     def reset_options(self):
@@ -1053,55 +1042,47 @@ class ClueGameApp:
         except sqlite3.Error as e:
             print(f"\nDatabase error: {str(e)}")
             input("Press Enter to continue...")
-
-    def _generate_murder_clues(self, murderer_id, co_murderer_id):
-        """Generate clues for all acts up to current"""
+    
+    def _generate_all_murder_clues(self, murderer_id, co_murderer_id):
+        """Generate murder clues for all acts (1-3) upfront"""
         with self.db.cursor() as c:
-            # Clear existing clues for this murderer
+            # Clear any existing clues for this murderer
             c.execute('DELETE FROM murder_clues WHERE murderer_id=?', (murderer_id,))
             
-            for act in range(1, self.current_act + 1):
+            for act in range(1, 4):  # Generate for all 3 acts
                 # Get 2 reliable clues from co-murderer
                 c.execute('''
-                    SELECT description 
-                    FROM clues 
+                    SELECT description FROM clues 
                     WHERE character_id=? AND act=?
-                    ORDER BY RANDOM()
-                    LIMIT 2
+                    ORDER BY RANDOM() LIMIT 2
                 ''', (co_murderer_id, act))
                 reliable_clues = [(row[0], 1) for row in c.fetchall()]
                 
                 # Get 1 unreliable clue from innocents
                 c.execute('''
-                    SELECT description 
-                    FROM clues
+                    SELECT description FROM clues
                     WHERE character_id NOT IN (?,?) AND act=?
-                    ORDER BY RANDOM()
-                    LIMIT 1
+                    ORDER BY RANDOM() LIMIT 1
                 ''', (murderer_id, co_murderer_id, act))
                 unreliable_clue = [(row[0], 0) for row in c.fetchall()]
                 
-                # Combine and store
+                # Store all clues
                 for clue_text, is_reliable in reliable_clues + unreliable_clue:
                     c.execute('''
-                        INSERT OR IGNORE INTO murder_clues
+                        INSERT INTO murder_clues 
                         VALUES (?, ?, ?, ?)
                     ''', (murderer_id, act, clue_text, is_reliable))
         
         self.db.commit()
- 
+   
     def _view_murderer_special_clues(self, murderer_id):
-        """Show all available murder clues"""
+        """Show pre-generated murder clues for current/previous acts"""
         clear_screen()
         print("=== SECRET MURDERER INTEL ===")
         
         try:
             with self.db.cursor() as c:
-                # Get co-murderer ID for reference
-                c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
-                co_murderer_id = c.fetchone()[0]
-                
-                # Display clues by act
+                # Display clues for each available act
                 for act in range(1, self.current_act + 1):
                     print(f"\n=== ACT {act} CLUES ===")
                     
@@ -1113,28 +1094,18 @@ class ClueGameApp:
                     ''', (murderer_id, act))
                     
                     clues = c.fetchall()
-                    if not clues:
-                        self._generate_murder_clues(murderer_id, co_murderer_id)
-                        c.execute('''
-                            SELECT clue_text, is_reliable
-                            FROM murder_clues
-                            WHERE murderer_id=? AND act=?
-                            ORDER BY RANDOM()
-                        ''', (murderer_id, act))
-                        clues = c.fetchall()
-                    
                     for i, (clue, is_reliable) in enumerate(clues, 1):
                         print(f"{i}. {clue}")
                         if not is_reliable and act < self.current_act:
                             print("   (Potentially unreliable information)")
                 
-            print("\nNote: New clues generate when advancing acts")
+            print(f"\nIntel prepared through Act {self.current_act}")
             input("\nPress Enter to continue...")
             
         except Exception as e:
             print(f"\nError accessing secret intel: {str(e)}")
-            input("Press Enter to continue...") 
-
+            input("Press Enter to continue...")
+   
     def _view_murderer_info(self, player_id, name):
         """Show murderer's special role information"""
         clear_screen()

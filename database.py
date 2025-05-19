@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
+from typing import Tuple
 
 PREDEFINED_CHARACTERS = [
     "Vivienne VanDerBloom",
@@ -405,12 +406,41 @@ class ClueData:
             if not c.fetchone():
                 c.execute('ALTER TABLE players ADD COLUMN is_accomplice INTEGER DEFAULT 0')
 
+            # Create game_state table if it doesn't exist
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS game_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    current_act INTEGER DEFAULT 1,
+                    game_status TEXT DEFAULT 'WAITING'
+                )
+            ''')
+            
+            # Initialize with default values if empty
+            c.execute('''
+                INSERT OR IGNORE INTO game_state (id, current_act, game_status)
+                VALUES (1, 1, 'WAITING')
+            ''')
+
     def commit(self):
         """Commit changes to the database"""
         conn = sqlite3.connect(self.db_path)
         conn.commit()
         conn.close()
 
+    def save_game_state(self, current_act: int, game_status: str):
+        with self.cursor() as c:
+            c.execute('''
+                UPDATE game_state
+                SET current_act = ?, game_status = ?
+                WHERE id = 1
+            ''', (current_act, game_status))
+        self.commit()
+
+    def load_game_state(self) -> Tuple[int, str]:
+        with self.cursor() as c:
+            c.execute('SELECT current_act, game_status FROM game_state WHERE id = 1')
+            return c.fetchone()
+    
     def _seed_characters(self):
         """Initialize the 8 core characters"""
         with self.cursor() as c:
