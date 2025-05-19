@@ -1,4 +1,4 @@
-import os, random, getpass, sys
+import os, random, getpass, sys, sqlite3
 from database import ClueData
 from typing import List, Tuple
 
@@ -15,13 +15,18 @@ class ClueGameApp:
         self.current_act = 1
         self.game_state = "WAITING"
         
-        # Load accomplice state from database
+        # Initialize murder_clues table
         with self.db.cursor() as c:
-            c.execute('SELECT id, password FROM players WHERE is_accomplice=1')
-            result = c.fetchone()
-            if result:
-                self.accomplice_id = result['id']
-                self.accomplice_password = result['password']
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS murder_clues (
+                    murderer_id INTEGER,
+                    act INTEGER,
+                    clue_text TEXT,
+                    is_reliable BOOLEAN,
+                    PRIMARY KEY (murderer_id, act, clue_text)
+                )
+            ''')
+        self.db.commit()
    
     def authenticate(self, prompt, password=None):
         clear_screen()
@@ -213,28 +218,28 @@ class ClueGameApp:
             print("Please enter a valid number")
         
         input("Press Enter to continue...")
-
+  
     def murderer_menu(self, player_id, name):
-        """Menu for logged-in murderer"""
+        """Updated menu for logged-in murderer"""
         while True:
             clear_screen()
             print(f"=== MURDERER MENU ({name}) ===")
-            print("1. View Co-Murderer")
-            print("2. View Special Clues")
+            print("1. View Special Clues")
+            print("2. View My Role Info")
             print("3. Logout")
             
             choice = input("Select an option: ").strip()
             
             if choice == '1':
-                self.view_co_murderer(player_id)
+                self._view_murderer_special_clues(player_id)
             elif choice == '2':
-                self.view_murderer_clues(player_id)
+                self._view_murderer_info(player_id, name)
             elif choice == '3':
                 return
             else:
                 print("Invalid choice")
                 input("Press Enter to continue...")
-
+  
     def view_murderers_accomplice(self):
         clear_screen()
         print("=== MURDERER IDENTITIES ===")
@@ -512,16 +517,28 @@ class ClueGameApp:
         input("\nPress Enter to continue...")
     
     def advance_act(self):
-        """Advance to the next act"""
+        """Advance to next act and generate murder clues"""
         if self.current_act >= 3:
             print("\nGame completed! All acts finished.")
             self.game_state = "COMPLETED"
         else:
             self.current_act += 1
+            
+            # Generate murder clues for new act
+            with self.db.cursor() as c:
+                c.execute('SELECT id FROM players WHERE is_murderer=1')
+                murderers = [row[0] for row in c.fetchall()]
+                
+                for murderer_id in murderers:
+                    c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
+                    co_murderer_id = c.fetchone()[0]
+                    self._generate_murder_clues(murderer_id, co_murderer_id)
+            
             print(f"\nAdvanced to Act {self.current_act}!")
+            print("Murderer intel has been updated for the new act.")
         
-        input("Press Enter to continue...")
-    
+        input("Press Enter to continue...") 
+   
     def reset_options(self):
         """Reset game options while preserving player roles"""
         clear_screen()
@@ -663,7 +680,7 @@ class ClueGameApp:
                 input("Press Enter to continue...")
    
     def restart_game(self):
-        """Completely reset all game data and tables"""
+        """Completely reset all game data and tables including murder_clues"""
         if not self.authenticate("HOST VERIFICATION", self.host_password):
             print("Invalid host password!")
             input("Press Enter to continue...")
@@ -676,15 +693,27 @@ class ClueGameApp:
         
         try:
             with self.db.cursor() as c:
-                # Drop and recreate all tables
+                # Drop all game tables including murder_clues
                 c.execute('DROP TABLE IF EXISTS players')
                 c.execute('DROP TABLE IF EXISTS clues')
                 c.execute('DROP TABLE IF EXISTS game_clues')
+                c.execute('DROP TABLE IF EXISTS murder_clues')  # New line
                 
                 # Reinitialize database
                 self.db._initialize_db()
                 self.db._seed_characters()
                 self.db._seed_clues()
+                
+                # Recreate murder_clues table structure
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS murder_clues (
+                        murderer_id INTEGER,
+                        act INTEGER,
+                        clue_text TEXT,
+                        is_reliable BOOLEAN,
+                        PRIMARY KEY (murderer_id, act, clue_text)
+                    )
+                ''')
                 
                 # Reset all game state
                 self.murderer_passwords = {}
@@ -697,8 +726,20 @@ class ClueGameApp:
             print("New game ready to be set up.")
         except Exception as e:
             print(f"\nError resetting game: {str(e)}")
+            # Ensure tables exist even if error occurs
+            with self.db.cursor() as c:
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS murder_clues (
+                        murderer_id INTEGER,
+                        act INTEGER,
+                        clue_text TEXT,
+                        is_reliable BOOLEAN,
+                        PRIMARY KEY (murderer_id, act, clue_text)
+                    )
+                ''')
+            self.db.commit()
         
-        input("Press Enter to continue...")   
+        input("Press Enter to continue...")
     
     def accomplice_menu(self, name: str):
         """Special menu for the accomplice with weighted clues"""
@@ -958,6 +999,168 @@ class ClueGameApp:
         print("\nDescription:")
         print(character_info['description'])
         print(f"\nHow To Act:\n{character_info['how_to_play']}")
+    
+    def _view_murderer_special_clues(self, murderer_id):
+        """Show randomized special clues with 2:1 ratio, stored persistently"""
+        clear_screen()
+        print("=== SECRET MURDERER INTEL ===")
+        
+        try:
+            with self.db.cursor() as c:
+                # Get or create murder_clues table
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS murder_clues (
+                        murderer_id INTEGER,
+                        act INTEGER,
+                        clue_text TEXT,
+                        is_reliable BOOLEAN,
+                        PRIMARY KEY (murderer_id, act, clue_text)
+                    )
+                ''')
+                
+                # Get co-murderer's ID
+                c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
+                co_murderer_id = c.fetchone()[0]
+                
+                # Check if we need to generate new clues
+                c.execute('''
+                    SELECT COUNT(*) FROM murder_clues 
+                    WHERE murderer_id=? AND act<=?
+                ''', (murderer_id, self.current_act))
+                if c.fetchone()[0] == 0:
+                    self._generate_murder_clues(murderer_id, co_murderer_id)
+                
+                # Display organized by act
+                for act in range(1, self.current_act + 1):
+                    print(f"\n=== ACT {act} CLUES ===")
+                    
+                    c.execute('''
+                        SELECT clue_text, is_reliable 
+                        FROM murder_clues
+                        WHERE murderer_id=? AND act=?
+                        ORDER BY RANDOM()
+                    ''', (murderer_id, act))
+                    
+                    clues = c.fetchall()
+                    for i, (clue, is_reliable) in enumerate(clues, 1):
+                        print(f"{i}. {clue}")
+                        if not is_reliable and act < self.current_act:
+                            print("   (Potentially unreliable information)")
+                    
+            print("\nNote: Clues are locked in and will persist between sessions")
+            input("\nPress Enter to continue...")
+            
+        except sqlite3.Error as e:
+            print(f"\nDatabase error: {str(e)}")
+            input("Press Enter to continue...")
+
+    def _generate_murder_clues(self, murderer_id, co_murderer_id):
+        """Generate clues for all acts up to current"""
+        with self.db.cursor() as c:
+            # Clear existing clues for this murderer
+            c.execute('DELETE FROM murder_clues WHERE murderer_id=?', (murderer_id,))
+            
+            for act in range(1, self.current_act + 1):
+                # Get 2 reliable clues from co-murderer
+                c.execute('''
+                    SELECT description 
+                    FROM clues 
+                    WHERE character_id=? AND act=?
+                    ORDER BY RANDOM()
+                    LIMIT 2
+                ''', (co_murderer_id, act))
+                reliable_clues = [(row[0], 1) for row in c.fetchall()]
+                
+                # Get 1 unreliable clue from innocents
+                c.execute('''
+                    SELECT description 
+                    FROM clues
+                    WHERE character_id NOT IN (?,?) AND act=?
+                    ORDER BY RANDOM()
+                    LIMIT 1
+                ''', (murderer_id, co_murderer_id, act))
+                unreliable_clue = [(row[0], 0) for row in c.fetchall()]
+                
+                # Combine and store
+                for clue_text, is_reliable in reliable_clues + unreliable_clue:
+                    c.execute('''
+                        INSERT OR IGNORE INTO murder_clues
+                        VALUES (?, ?, ?, ?)
+                    ''', (murderer_id, act, clue_text, is_reliable))
+        
+        self.db.commit()
+ 
+    def _view_murderer_special_clues(self, murderer_id):
+        """Show all available murder clues"""
+        clear_screen()
+        print("=== SECRET MURDERER INTEL ===")
+        
+        try:
+            with self.db.cursor() as c:
+                # Get co-murderer ID for reference
+                c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
+                co_murderer_id = c.fetchone()[0]
+                
+                # Display clues by act
+                for act in range(1, self.current_act + 1):
+                    print(f"\n=== ACT {act} CLUES ===")
+                    
+                    c.execute('''
+                        SELECT clue_text, is_reliable
+                        FROM murder_clues
+                        WHERE murderer_id=? AND act=?
+                        ORDER BY RANDOM()
+                    ''', (murderer_id, act))
+                    
+                    clues = c.fetchall()
+                    if not clues:
+                        self._generate_murder_clues(murderer_id, co_murderer_id)
+                        c.execute('''
+                            SELECT clue_text, is_reliable
+                            FROM murder_clues
+                            WHERE murderer_id=? AND act=?
+                            ORDER BY RANDOM()
+                        ''', (murderer_id, act))
+                        clues = c.fetchall()
+                    
+                    for i, (clue, is_reliable) in enumerate(clues, 1):
+                        print(f"{i}. {clue}")
+                        if not is_reliable and act < self.current_act:
+                            print("   (Potentially unreliable information)")
+                
+            print("\nNote: New clues generate when advancing acts")
+            input("\nPress Enter to continue...")
+            
+        except Exception as e:
+            print(f"\nError accessing secret intel: {str(e)}")
+            input("Press Enter to continue...") 
+
+    def _view_murderer_info(self, player_id, name):
+        """Show murderer's special role information"""
+        clear_screen()
+        print(f"=== YOUR ROLE INFO ({name}) ===")
+        
+        with self.db.cursor() as c:
+            # Get co-murderer's name
+            c.execute('''
+                SELECT name FROM players 
+                WHERE is_murderer=1 AND id!=?
+            ''', (player_id,))
+            co_murderer = c.fetchone()[0]
+            
+            # Get password
+            c.execute('SELECT password FROM players WHERE id=?', (player_id,))
+            password = c.fetchone()[0]
+        
+        print(f"\nYou are: The Murderer")
+        print(f"Your Partner: {co_murderer}")
+        print(f"Your Password: {password}")
+        print("\nSpecial Abilities:")
+        print("- See secret murderer-only clues")
+        print("- Know your partner's identity")
+        print("- Some of your clues are more reliable")
+        
+        input("\nPress Enter to continue...")
    
     def main_menu(self):
         while True:
@@ -984,9 +1187,8 @@ class ClueGameApp:
             elif choice == '5':
                 self.view_character_descriptions()  # New function
             elif choice == '6':
-                if self.confirm_action("Are you sure you want to exit?"):
-                    print("Goodbye!")
-                    sys.exit()
+                print("Goodbye!")
+                sys.exit()
             else:
                 print("Invalid choice")
                 input("Press Enter to continue...")
