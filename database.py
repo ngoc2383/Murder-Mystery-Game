@@ -343,46 +343,57 @@ PREDEFINED_CHARACTER_CLUE_SETS = {
 class ClueData:
     def __init__(self, db_path='clue_data.db'):
         self.db_path = db_path
+        # Initialize connection first
+        self.conn = sqlite3.connect(db_path, timeout=10)
+        self.conn.row_factory = sqlite3.Row
+        # Then initialize tables
         self._initialize_db()
         self._seed_characters()
-        self._seed_clues()  # Combined seeding of sets and clues
+        self._seed_clues()
     
     @contextmanager
     def cursor(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row  # Enable dictionary-style access
-        cursor = conn.cursor()
+        """Simple context manager for database operations"""
+        cursor = self.conn.cursor()
         try:
             yield cursor
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise e
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         finally:
-            conn.close()
-
+            cursor.close()
+    
+    def close(self):
+        """Close the database connection"""
+        if hasattr(self, 'conn') and self.conn:
+            self.conn.close()
+    
     def _initialize_db(self):
         """Initialize database tables"""
         with self.cursor() as c:
-            # Create tables if they don't exist
+            # Create players table
             c.execute('''
                 CREATE TABLE IF NOT EXISTS players (
                     id INTEGER PRIMARY KEY,
-                    name TEXT UNIQUE NOT NULL,
-                    is_murderer BOOLEAN DEFAULT NULL,
+                    name TEXT,
+                    password TEXT,
+                    is_murderer BOOLEAN DEFAULT 0,
                     is_accomplice BOOLEAN DEFAULT 0,
-                    has_completed BOOLEAN DEFAULT 0,
-                    password TEXT DEFAULT NULL
+                    is_detective BOOLEAN DEFAULT 0,
+                    is_investigator BOOLEAN DEFAULT 0,
+                    has_completed BOOLEAN DEFAULT 0
                 )
             ''')
             
+            # Create other tables
             c.execute('''
                 CREATE TABLE IF NOT EXISTS clues (
                     id INTEGER PRIMARY KEY,
                     character_id INTEGER NOT NULL,
-                    set_number INTEGER NOT NULL,  -- 1-3
-                    act INTEGER NOT NULL,         -- 1-3
-                    clue_number INTEGER NOT NULL,  -- 1-3
+                    set_number INTEGER NOT NULL,
+                    act INTEGER NOT NULL,
+                    clue_number INTEGER NOT NULL,
                     description TEXT NOT NULL,
                     FOREIGN KEY(character_id) REFERENCES players(id),
                     UNIQUE(character_id, set_number, act, clue_number)
@@ -397,16 +408,17 @@ class ClueData:
                     clue3 TEXT NOT NULL
                 )
             ''')
-
-            # Check if is_accomplice column exists (alternative method)
+            
             c.execute('''
-                SELECT name FROM pragma_table_info('players') 
-                WHERE name='is_accomplice'
+                CREATE TABLE IF NOT EXISTS murder_clues (
+                    murderer_id INTEGER,
+                    act INTEGER,
+                    clue_text TEXT,
+                    is_reliable BOOLEAN,
+                    PRIMARY KEY (murderer_id, act, clue_text)
+                )
             ''')
-            if not c.fetchone():
-                c.execute('ALTER TABLE players ADD COLUMN is_accomplice INTEGER DEFAULT 0')
-
-            # Create game_state table if it doesn't exist
+            
             c.execute('''
                 CREATE TABLE IF NOT EXISTS game_state (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -415,12 +427,10 @@ class ClueData:
                 )
             ''')
             
-            # Initialize with default values if empty
-            c.execute('''
-                INSERT OR IGNORE INTO game_state (id, current_act, game_status)
-                VALUES (1, 1, 'WAITING')
-            ''')
+            # Initialize game state
+            c.execute('INSERT OR IGNORE INTO game_state VALUES (1, 1, "WAITING")')
 
+    # ... keep all your other existing methods exactly as they were ...
     def commit(self):
         """Commit changes to the database"""
         conn = sqlite3.connect(self.db_path)
@@ -438,8 +448,46 @@ class ClueData:
 
     def load_game_state(self) -> Tuple[int, str]:
         with self.cursor() as c:
-            c.execute('SELECT current_act, game_status FROM game_state WHERE id = 1')
-            return c.fetchone()
+            try:
+                # First check if table exists
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='game_state'")
+                if not c.fetchone():
+                    # Create table if it doesn't exist
+                    c.execute('''
+                        CREATE TABLE game_state (
+                            id INTEGER PRIMARY KEY CHECK (id = 1),
+                            current_act INTEGER DEFAULT 1,
+                            game_status TEXT DEFAULT 'WAITING'
+                        )
+                    ''')
+                    # Insert default row
+                    c.execute('INSERT INTO game_state VALUES (1, 1, "WAITING")')
+                    return (1, "WAITING")
+                
+                # Now try to get the state
+                c.execute('SELECT current_act, game_status FROM game_state WHERE id = 1')
+                row = c.fetchone()
+                
+                if row:
+                    return (row['current_act'], row['game_status'])
+                else:
+                    # Insert default row if table exists but is empty
+                    c.execute('INSERT INTO game_state VALUES (1, 1, "WAITING")')
+                    return (1, "WAITING")
+                    
+            except sqlite3.Error as e:
+                print(f"Error loading game state: {e}")
+                # Create fresh state if anything goes wrong
+                c.execute('DROP TABLE IF EXISTS game_state')
+                c.execute('''
+                    CREATE TABLE game_state (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        current_act INTEGER DEFAULT 1,
+                        game_status TEXT DEFAULT 'WAITING'
+                    )
+                ''')
+                c.execute('INSERT INTO game_state VALUES (1, 1, "WAITING")')
+                return (1, "WAITING")
     
     def _seed_characters(self):
         """Initialize the 8 core characters"""
