@@ -400,12 +400,16 @@ class ClueData:
                 )
             ''')
             
+            # game_clues table
             c.execute('''
                 CREATE TABLE IF NOT EXISTS game_clues (
                     act INTEGER PRIMARY KEY,
-                    clue1 TEXT NOT NULL,
-                    clue2 TEXT NOT NULL,
-                    clue3 TEXT NOT NULL
+                    clue1 TEXT,
+                    clue2 TEXT,
+                    clue3 TEXT,
+                    reliability1 INTEGER,  # 1-3 scale
+                    reliability2 INTEGER,
+                    reliability3 INTEGER
                 )
             ''')
             

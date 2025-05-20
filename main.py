@@ -947,44 +947,103 @@ class ClueGameApp:
                 input("Press Enter to continue...")
 
     def _get_weighted_accomplice_clues(self, act: int) -> List[Tuple[str, int]]:
-        """Get the same 3 game clues but with reliability ratings"""
+        """Get the same 3 game clues with probabilistic reliability ratings"""
         with self.db.cursor() as c:
             # Get the standard 3 game clues for this act
+            c.execute('SELECT clue1, clue2, clue3, reliability1, reliability2, reliability3 FROM game_clues WHERE act=?', (act,))
+            row = c.fetchone()
+            
+            if not row:
+                return []
+                
+            # Check if we need to generate new reliability ratings
+            if row['reliability1'] is None:
+                return self._generate_probabilistic_clues(act)
+                
+            # Return existing weighted clues
+            return [
+                (row['clue1'], row['reliability1']),
+                (row['clue2'], row['reliability2']),
+                (row['clue3'], row['reliability3'])
+            ]
+
+    def _generate_probabilistic_clues(self, act: int) -> List[Tuple[str, int]]:
+        """Generate new probabilistic reliability ratings for clues"""
+        with self.db.cursor() as c:
+            # Get the base clues
             c.execute('SELECT clue1, clue2, clue3 FROM game_clues WHERE act=?', (act,))
             game_clues = c.fetchone()
             
             if not game_clues:
                 return []
                 
-            # Get reliability weights for each clue
             weighted_clues = []
+            reliability_values = []
+            
             for clue in [game_clues['clue1'], game_clues['clue2'], game_clues['clue3']]:
-                # Extract character name from clue string (format: "Name - Clue - Act X - Set Y")
                 try:
                     character_name = clue.split(' - ')[0].strip()
                 except:
                     # Fallback if clue format is different
-                    weighted_clues.append((clue, 1))  # Default weight
+                    weighted_clues.append((clue, 1))
+                    reliability_values.append(1)
                     continue
                     
-                # Get weight for this character's clue
+                # Get character role info
                 c.execute('''
-                    SELECT 
-                        CASE 
-                            WHEN is_murderer=1 THEN 3  -- Highest weight for murderers
-                            WHEN id=? THEN 2           -- Medium weight for accomplice's own clues
-                            ELSE 1                     -- Low weight for others
-                        END as weight
+                    SELECT is_murderer, is_accomplice 
                     FROM players 
                     WHERE name=?
-                ''', (self.accomplice_id, character_name))
-                
+                ''', (character_name,))
                 result = c.fetchone()
-                weight = result['weight'] if result else 1
-                weighted_clues.append((clue, weight))
                 
+                if not result:
+                    weight = 1
+                else:
+                    is_murderer = result['is_murderer']
+                    is_accomplice = result['is_accomplice']
+                    
+                    # Probabilistic weight assignment
+                    rand_val = random.random()
+                    
+                    if is_murderer:
+                        # Murderer's clue: 70% strong (3), 20% medium (2), 10% weak (1)
+                        if rand_val < 0.7:
+                            weight = 3
+                        elif rand_val < 0.9:
+                            weight = 2
+                        else:
+                            weight = 1
+                    elif is_accomplice:
+                        # Accomplice's clue: 60% medium (2), 30% strong (3), 10% weak (1)
+                        if rand_val < 0.6:
+                            weight = 2
+                        elif rand_val < 0.9:
+                            weight = 3
+                        else:
+                            weight = 1
+                    else:
+                        # Innocent's clue: 80% weak (1), 15% medium (2), 5% strong (3)
+                        if rand_val < 0.8:
+                            weight = 1
+                        elif rand_val < 0.95:
+                            weight = 2
+                        else:
+                            weight = 3
+                
+                weighted_clues.append((clue, weight))
+                reliability_values.append(weight)
+            
+            # Store the reliability values
+            c.execute('''
+                UPDATE game_clues 
+                SET reliability1=?, reliability2=?, reliability3=?
+                WHERE act=?
+            ''', (*reliability_values, act))
+            self.db.commit()
+            
             return weighted_clues
-  
+   
     def view_accomplice_clues_weighted(self):
         """Show standard 3 game clues with reliability ratings"""
         clear_screen()
@@ -1669,6 +1728,6 @@ if __name__ == "__main__":
     app = ClueGameApp()
     app.main_menu()
 
-# Everything working except game clues just not generate
-# The murder clues generate with the 2:1 ratio- it should NOT do that
-# It should do the same thing as the game clues generation algorithm
+# Everything working except the accomplice weight clues should be updated
+# It should be updated to:
+# - Be stored in the game_clue table, special section
