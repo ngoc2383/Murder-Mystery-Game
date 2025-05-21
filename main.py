@@ -63,7 +63,7 @@ class ClueGameApp:
             
             # Verify murder clues
             c.execute('SELECT COUNT(*) FROM murder_clues')
-            if c.fetchone()[0] == 0 and self.game_state == "READY":
+            if c.fetchone()[0] == 0 and self.game_state == "IN PROCESS":
                 print("Regenerating missing murder clues...")
                 c.execute('SELECT id FROM players WHERE is_murderer=1')
                 murderers = [row[0] for row in c.fetchall()]
@@ -111,8 +111,6 @@ class ClueGameApp:
         self.detective_id = None  # Add these new lines
         self.investigator_id = None
         self.db.commit()
-        print("\nAll player logins have been reset!")
-        input("Press Enter to continue...")
 
     def reset_single_player(self, player_id: int):
         """Reset a single player's login status"""
@@ -135,8 +133,6 @@ class ClueGameApp:
             self.investigator_id = None
             
         self.db.commit()
-        print("\nPlayer login has been reset!")
-        input("Press Enter to continue...")
    
     def confirm_action(self, prompt):
         while True:
@@ -372,6 +368,11 @@ class ClueGameApp:
                 print(f"{idx}. {name}{status}")
             
             if all(completed for _, _, completed in players):
+                # Update game state to READY in both memory and database
+                if self.game_state != "READY" and self.game_state != "IN PROCESS":
+                    self.game_state = "READY"
+                    self.db.save_game_state(self.current_act, self.game_state)
+                
                 # Always show verification option when all players are complete
                 print("\nAll characters have completed login.")
                 print("1. Verify roles")
@@ -379,7 +380,7 @@ class ClueGameApp:
                 
                 choice = input("\nSelect option: ").strip()
                 if choice == "1":
-                    self.check_roles_setup()
+                    self.check_roles_setup()  # This will move to IN_PROGRESS if roles are valid
                     continue
                 elif choice == "2":
                     return
@@ -387,10 +388,10 @@ class ClueGameApp:
                     print("Invalid choice")
                     input("Press Enter to continue...")
                     continue
-                
+                    
             try:
-                choice = input("\nEnter character number (or 'back'): ").strip()
-                if choice.lower() == 'back':
+                choice = input("\nEnter character number (or 'back'): ").strip().lower()
+                if choice == 'back' or choice == 'b':
                     return
                 
                 choice = int(choice)
@@ -402,14 +403,91 @@ class ClueGameApp:
                         continue
                     
                     self.handle_role_selection(selected_id, selected_name)
+                    
+                    # Check if this was the last player to complete login
+                    players = self.db.get_players_with_status()
+                    if all(completed for _, _, completed in players):
+                        self.game_state = "READY"
+                        self.db.save_game_state(self.current_act, self.game_state)
+                    
                     break
                 
                 print(f"Please enter 1-{len(players)} or 'back'")
                 input("Press Enter to continue...")
             except ValueError:
                 print("Please enter a valid number or 'back'")
-                input("Press Enter to continue...")
-    
+                input("Press Enter to continue...") 
+   
+    def check_roles_setup(self):
+        clear_screen()
+        print("=== ROLES VERIFICATION ===")
+        
+        try:
+            # First get all role counts
+            with self.db.cursor() as c:
+                # Get all special roles
+                c.execute('SELECT id FROM players WHERE is_accomplice=1')
+                accomplice = c.fetchone()
+                self.accomplice_id = accomplice[0] if accomplice else None
+                
+                c.execute('SELECT id FROM players WHERE is_detective=1')
+                detective = c.fetchone()
+                self.detective_id = detective[0] if detective else None
+                
+                c.execute('SELECT id FROM players WHERE is_investigator=1')
+                investigator = c.fetchone()
+                self.investigator_id = investigator[0] if investigator else None
+                
+                # Get counts
+                murderer_count = self.check_murderer_count()
+                accomplice_count = 1 if self.accomplice_id else 0
+                detective_count = 1 if self.detective_id else 0
+                investigator_count = 1 if self.investigator_id else 0
+                
+                # Check if all roles are properly assigned
+                if (murderer_count == 2 and accomplice_count == 1 
+                        and detective_count == 1 and investigator_count == 1):
+                    print("\nAll roles properly assigned!")
+                    print(f"- Murderers: {murderer_count}/2")
+                    print(f"- Accomplice: {accomplice_count}/1")
+                    print(f"- Detective: {detective_count}/1")
+                    print(f"- Investigator: {investigator_count}/1")
+                    
+                    # Update game state immediately
+                    self.game_state = "IN PROCESS"
+                    self.db.save_game_state(self.current_act, self.game_state)
+                    
+                    # Generate game clues if needed
+                    if not self._game_clues_exist():
+                        self._assign_clue_sets()
+                        self._select_final_clues_for_acts()
+                    print("\nGame clues initialized!")
+                    
+                    # Get murderer IDs
+                    c.execute('SELECT id FROM players WHERE is_murderer=1')
+                    murderers = [row[0] for row in c.fetchall()]
+            
+            # Generate murder clues with separate cursor
+            for murderer_id in murderers:
+                with self.db.cursor() as c:
+                    c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
+                    co_murderer_id = c.fetchone()[0]
+                self._generate_all_murder_clues(murderer_id, co_murderer_id)
+            print("Murderer intel generated!")
+            
+            # Generate investigator hints with separate cursor
+            with self.db.cursor() as c:
+                c.execute('SELECT COUNT(*) FROM investigator_hints')
+                if c.fetchone()[0] == 0:
+                    self._generate_investigator_hints()
+            print("Investigator hints generated!")
+            
+        except Exception as e:
+            print(f"\nERROR during role setup: {e}")
+            import traceback
+            traceback.print_exc()
+        input("\nPress Enter to continue...")
+   
     def handle_role_selection(self, player_id, player_name):
         while True:
             clear_screen()
@@ -475,67 +553,6 @@ class ClueGameApp:
                 print("Invalid choice")
                 input("Press Enter to continue...")
   
-    def check_roles_setup(self):
-        clear_screen()
-        print("=== ROLES VERIFICATION ===")
-        
-        try:
-            with self.db.cursor() as c:
-                # Get all special roles
-                c.execute('SELECT id FROM players WHERE is_accomplice=1')
-                accomplice = c.fetchone()
-                self.accomplice_id = accomplice[0] if accomplice else None
-                
-                c.execute('SELECT id FROM players WHERE is_detective=1')
-                detective = c.fetchone()
-                self.detective_id = detective[0] if detective else None
-                
-                c.execute('SELECT id FROM players WHERE is_investigator=1')
-                investigator = c.fetchone()
-                self.investigator_id = investigator[0] if investigator else None
-                
-                # Get counts
-                murderer_count = self.check_murderer_count()
-                accomplice_count = 1 if self.accomplice_id else 0
-                detective_count = 1 if self.detective_id else 0
-                investigator_count = 1 if self.investigator_id else 0
-                
-                # Check if all roles are properly assigned
-                if (murderer_count == 2 and accomplice_count == 1 
-                        and detective_count == 1 and investigator_count == 1):
-                    print("\nAll roles properly assigned!")
-                    self.game_state = "READY"
-                    
-                    # Generate game clues first if needed
-                    if not self._game_clues_exist():
-                        self._assign_clue_sets()
-                        self._select_final_clues_for_acts()
-                        print("\nGame clues initialized!")
-                    
-                    # Generate murder clues
-                    with self.db.cursor() as c:
-                        c.execute('SELECT id FROM players WHERE is_murderer=1')
-                        murderers = [row[0] for row in c.fetchall()]
-                        
-                        for murderer_id in murderers:
-                            c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
-                            co_murderer_id = c.fetchone()[0]
-                            self._generate_all_murder_clues(murderer_id, co_murderer_id)
-                    
-                    print("Murderer intel generated!")
-                    self.db.save_game_state(self.current_act, self.game_state)
-                else:
-                    print("\nWARNING: Role setup incomplete!")
-                    print(f"- Murderers: {murderer_count}/2")
-                    print(f"- Accomplice: {accomplice_count}/1")
-                    print(f"- Detective: {detective_count}/1")
-                    print(f"- Investigator: {investigator_count}/1")
-                    
-        except Exception as e:
-            print(f"\nERROR during role setup: {e}")
-        
-        input("\nPress Enter to continue...")
-   
     def _prepare_game_if_needed(self):
         """Prepare game if all players are registered but game isn't setup"""
         with self.db.cursor() as c:
@@ -693,74 +710,25 @@ class ClueGameApp:
             if self.confirm_action("Reset one player checkins?"):
                 player_id = int(input("User ID to reset: "))
                 self.reset_single_player(player_id)
-                print("\nThis player checkins have been reset!")    
+                print("\nThis player checkins have been reset!")
         elif choice == '5':
             return
         else:
             print("Invalid choice")
         
-        input("Press Enter to continue...")
-
-    def check_roles_setup(self):
-        clear_screen()
-        print("=== ROLES VERIFICATION ===")
-        
-        try:
+        # Reset game state to WAITING after any reset operation (except back)
+        if choice in ('1', '2', '3', '4'):
             with self.db.cursor() as c:
-                # Get all special roles
-                c.execute('SELECT id FROM players WHERE is_accomplice=1')
-                accomplice = c.fetchone()
-                self.accomplice_id = accomplice[0] if accomplice else None
-                
-                c.execute('SELECT id FROM players WHERE is_detective=1')
-                detective = c.fetchone()
-                self.detective_id = detective[0] if detective else None
-                
-                c.execute('SELECT id FROM players WHERE is_investigator=1')
-                investigator = c.fetchone()
-                self.investigator_id = investigator[0] if investigator else None
-                
-                # Get counts
-                murderer_count = self.check_murderer_count()
-                accomplice_count = 1 if self.accomplice_id else 0
-                detective_count = 1 if self.detective_id else 0
-                investigator_count = 1 if self.investigator_id else 0
-                
-                # Check if all roles are properly assigned
-                if (murderer_count == 2 and accomplice_count == 1 
-                        and detective_count == 1 and investigator_count == 1):
-                    print("\nAll roles properly assigned!")
-                    self.game_state = "READY"
-                    
-                    # Generate game clues first if needed
-                    if not self._game_clues_exist():
-                        self._assign_clue_sets()
-                        self._select_final_clues_for_acts()
-                        print("\nGame clues initialized!")
-                    
-                    # Generate murder clues
-                    with self.db.cursor() as c:
-                        c.execute('SELECT id FROM players WHERE is_murderer=1')
-                        murderers = [row[0] for row in c.fetchall()]
-                        
-                        for murderer_id in murderers:
-                            c.execute('SELECT id FROM players WHERE is_murderer=1 AND id!=?', (murderer_id,))
-                            co_murderer_id = c.fetchone()[0]
-                            self._generate_all_murder_clues(murderer_id, co_murderer_id)
-                    
-                    print("Murderer intel regenerated for all acts!")
-                    self.db.save_game_state(self.current_act, self.game_state)
-                else:
-                    print("\nWARNING: Role setup incomplete!")
-                    print(f"- Murderers: {murderer_count}/2")
-                    print(f"- Accomplice: {accomplice_count}/1")
-                    print(f"- Detective: {detective_count}/1")
-                    print(f"- Investigator: {investigator_count}/1")
-                    
-        except Exception as e:
-            print(f"\nERROR during role setup: {e}")
+                c.execute('''
+                    UPDATE game_state
+                    SET game_status='WAITING'
+                    WHERE id=1
+                ''')
+            self.game_state = "WAITING"
+            self.db.commit()
+            print("Game state has been reset to WAITING")
         
-        input("\nPress Enter to continue...")
+        input("Press Enter to continue...")
     
     def _game_clues_exist(self) -> bool:
         """Check if game clues already exist"""
@@ -860,6 +828,7 @@ class ClueGameApp:
                 c.execute('DROP TABLE IF EXISTS clues')
                 c.execute('DROP TABLE IF EXISTS game_clues')
                 c.execute('DROP TABLE IF EXISTS murder_clues')
+                c.execute('DROP TABLE IF EXISTS investigator_hints')  # Drop the hints table
                 c.execute('DROP TABLE IF EXISTS game_state')
 
                 # Reinitialize database
@@ -883,6 +852,17 @@ class ClueGameApp:
                         id INTEGER PRIMARY KEY CHECK (id = 1),
                         current_act INTEGER DEFAULT 1,
                         game_status TEXT DEFAULT 'WAITING'
+                    )
+                ''')
+                
+                # Add recreation of investigator_hints table
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS investigator_hints (
+                        act INTEGER,
+                        character_id INTEGER,
+                        character_name TEXT,
+                        is_innocent BOOLEAN,
+                        PRIMARY KEY (act, character_id)
                     )
                 ''')
                 
@@ -924,15 +904,24 @@ class ClueGameApp:
                         game_status TEXT DEFAULT 'WAITING'
                     )
                 ''')
-                # Ensure at least one row exists
+                # Add recreation of investigator_hints in emergency recovery
+                c.execute('''
+                    CREATE TABLE IF NOT EXISTS investigator_hints (
+                        act INTEGER,
+                        character_id INTEGER,
+                        character_name TEXT,
+                        is_innocent BOOLEAN,
+                        PRIMARY KEY (act, character_id)
+                    )
+                ''')
+                # Ensure at least one row exists in game_state
                 c.execute('SELECT COUNT(*) FROM game_state')
                 if c.fetchone()[0] == 0:
                     c.execute('INSERT INTO game_state VALUES (1, 1, "WAITING")')
             self.db.commit()
             print("Recovery complete - basic tables recreated")
         sys.exit()
-        #input("Press Enter to continue...")
-    
+  
     def accomplice_menu(self, name: str):
         """Special menu for the accomplice with weighted clues"""
         while True:
@@ -1252,7 +1241,7 @@ class ClueGameApp:
             
             choice = input("\nYour choice: ").strip().lower()
             
-            if choice == 'back':
+            if choice == 'back' or choice == 'b':
                 return
             try:
                 char_id = int(choice)
@@ -1614,44 +1603,81 @@ class ClueGameApp:
                 print("Invalid choice")
                 input("Press Enter to continue...")
 
+    def _generate_investigator_hints(self):
+        """Generate and store investigator hints for all acts"""
+        with self.db.cursor() as c:
+            # Clear existing hints
+            c.execute('DELETE FROM investigator_hints')
+            
+            for act in range(1, 4):  # Acts 1-3
+                # Get all non-murderer characters
+                c.execute('''
+                    SELECT id, name FROM players 
+                    WHERE is_murderer=0 AND id!=?
+                ''', (self.investigator_id,))
+                innocent_chars = c.fetchall()
+                
+                # Get all murderer characters
+                c.execute('SELECT id, name FROM players WHERE is_murderer=1')
+                murderer_chars = c.fetchall()
+                
+                if not innocent_chars:
+                    continue
+                    
+                # Select one character to be the hint for this act
+                # 70% chance to show a real innocent, 30% chance to show a murderer
+                if random.random() < 0.7:
+                    # Show a real innocent
+                    char_id, char_name = random.choice(innocent_chars)
+                    is_innocent = True
+                else:
+                    # Show a murderer (false info)
+                    if murderer_chars:
+                        char_id, char_name = random.choice(murderer_chars)
+                        is_innocent = False
+                    else:
+                        char_id, char_name = random.choice(innocent_chars)
+                        is_innocent = True
+                
+                # Store the hint
+                c.execute('''
+                    INSERT INTO investigator_hints 
+                    VALUES (?, ?, ?, ?)
+                ''', (act, char_id, char_name, is_innocent))
+        
+        self.db.commit()
+   
     def view_innocent_hint(self):
-        """Show one innocent character (70% chance of being correct)"""
+        """Show stored investigator hint for current act"""
         clear_screen()
         print("=== INVESTIGATOR'S HINT ===")
         
         with self.db.cursor() as c:
-            # Get all non-murderer characters (excluding self)
+            # Get hint for current act
             c.execute('''
-                SELECT id, name FROM players 
-                WHERE is_murderer=0 AND id!=?
-            ''', (self.investigator_id,))
-            innocent_chars = c.fetchall()
+                SELECT character_name, is_innocent 
+                FROM investigator_hints 
+                WHERE act=?
+            ''', (self.current_act,))
+            result = c.fetchone()
             
-            # Get all murderer characters
-            c.execute('SELECT id, name FROM players WHERE is_murderer=1')
-            murderer_chars = c.fetchall()
-            
-            if not innocent_chars:
-                print("\nNo innocent characters identified yet.")
+            if not result:
+                print("\nNo hint available for current act!")
                 input("\nPress Enter to continue...")
                 return
+                
+            char_name, is_innocent = result
             
-            # 70% chance to show a real innocent, 30% chance to show a murderer
-            if random.random() < 0.7:
-                # Show a real innocent
-                char_id, char_name = random.choice(innocent_chars)
-            else:
-                # Show a murderer (false info)
-                if murderer_chars:
-                    char_id, char_name = random.choice(murderer_chars)
-                else:
-                    char_id, char_name = random.choice(innocent_chars)
+            print(f"\nYour investigation suggests that {char_name} is NOT a murderer.")
             
-            print(f"\nYour investigation suggests that {char_name} (id: {char_id}) is NOT a murderer.")
+            # Add reliability indicator (not shown to player, just for debugging)
+            reliability = "RELIABLE" if is_innocent else "MISLEADING"
+            print(f"\n[DEBUG: This hint is {reliability}]")  # Remove this in production
+            
             print("\nRemember: Even reliable hints might be misleading!")
         
         input("\nPress Enter to continue...")
-
+  
     def view_detective_info(self):
         """Show the detective's character information"""
         clear_screen()

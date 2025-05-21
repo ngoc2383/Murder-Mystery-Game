@@ -433,6 +433,17 @@ class ClueData:
             
             # Initialize game state
             c.execute('INSERT OR IGNORE INTO game_state VALUES (1, 1, "WAITING")')
+            
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS investigator_hints (
+                    act INTEGER,
+                    character_id INTEGER,
+                    character_name TEXT,
+                    is_innocent BOOLEAN,
+                    PRIMARY KEY (act, character_id)
+                )
+            ''')
+            
 
     # ... keep all your other existing methods exactly as they were ...
     def commit(self):
