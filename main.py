@@ -1780,7 +1780,3 @@ class ClueGameApp:
 if __name__ == "__main__":
     app = ClueGameApp()
     app.main_menu()
-
-# Everything working except the accomplice weight clues should be updated
-# It should be updated to:
-# - Be stored in the game_clue table, special section
