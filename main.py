@@ -522,7 +522,7 @@ class ClueGameApp:
                             co_murderer_id = c.fetchone()[0]
                             self._generate_all_murder_clues(murderer_id, co_murderer_id)
                     
-                    print("Murderer intel regenerated for all acts!")
+                    print("Murderer intel generated!")
                     self.db.save_game_state(self.current_act, self.game_state)
                 else:
                     print("\nWARNING: Role setup incomplete!")
@@ -1640,18 +1640,14 @@ class ClueGameApp:
             if random.random() < 0.7:
                 # Show a real innocent
                 char_id, char_name = random.choice(innocent_chars)
-                reliability = "✓ Likely accurate"
             else:
                 # Show a murderer (false info)
                 if murderer_chars:
                     char_id, char_name = random.choice(murderer_chars)
-                    reliability = "✗ Potentially misleading"
                 else:
                     char_id, char_name = random.choice(innocent_chars)
-                    reliability = "✓ Likely accurate"
             
-            print(f"\nYour investigation suggests that {char_name} is not a murderer.")
-            print(f"Reliability: {reliability}")
+            print(f"\nYour investigation suggests that {char_name} (id: {char_id}) is NOT a murderer.")
             print("\nRemember: Even reliable hints might be misleading!")
         
         input("\nPress Enter to continue...")
