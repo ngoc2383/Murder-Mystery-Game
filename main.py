@@ -612,37 +612,42 @@ class ClueGameApp:
         self.db.commit()
  
     def _select_weighted_clues(self, act: int) -> List[str]:
-        """Select 3 clues for an act with murderer weighting"""
+        """Select 3 clues for an act with dynamic murderer weighting (randomized between 2-5)"""
         with self.db.cursor() as c:
             c.execute('''
-                SELECT c.description, 
-                    CASE WHEN p.is_murderer=1 THEN 6 ELSE 1 END as weight
+                SELECT c.description, p.is_murderer
                 FROM clues c
                 JOIN players p ON c.character_id = p.id
                 WHERE c.act = ? 
                 AND c.set_number = p.has_completed
             ''', (act,))
-            weighted_clues = c.fetchall()
-        
-        if not weighted_clues:
+            clue_rows = c.fetchall()
+
+        if not clue_rows:
             return ["No clues available"] * 3
-        
-        # Convert to separate lists for random.choices
-        clues = [row[0] for row in weighted_clues]
-        weights = [row[1] for row in weighted_clues]
-        
-        # Select 3 unique clues with weighting
+
+        # Assign dynamic weights based on murderer status
+        clues = []
+        weights = []
+        for description, is_murderer in clue_rows:
+            clues.append(description)
+            if is_murderer:
+                weights.append(random.randint(2, 5))  # Random weight for murderer clue
+            else:
+                weights.append(1)
+
+        # Select 3 unique clues with weighted randomness
         selected = []
         remaining = list(zip(clues, weights))
-        
+
         while len(selected) < 3 and remaining:
             remaining_clues, remaining_weights = zip(*remaining)
             chosen = random.choices(remaining_clues, weights=remaining_weights, k=1)[0]
             selected.append(chosen)
             remaining = [c for c in remaining if c[0] != chosen]
-        
+
         return selected[:3]
-    
+
     def get_game_clues(self, act: int) -> List[str]:
         """Get pre-formatted game clues for a specific act"""
         with self.db.cursor() as c:
@@ -695,41 +700,57 @@ class ClueGameApp:
         choice = input("Select an option: ").strip()
         
         if choice == '1':
-            if self.confirm_action("Reset all clue set assignments?"):
-                self.prepare_clue_pools()
-                print("\nClue sets have been randomly reassigned!")
+            if self.confirm_action("Reset all clue set assignments and clues?"):
+                with self.db.cursor() as c:
+                    # Clear all clue tables
+                    c.execute('DELETE FROM game_clues')
+                    c.execute('DELETE FROM murder_clues')
+                    c.execute('DELETE FROM investigator_hints')
+                    
+                    # Reset game state
+                    self.current_act = 1
+                    self.game_state = "READY"
+                    c.execute('''
+                        UPDATE game_state
+                        SET current_act=1, game_status='READY'
+                        WHERE id=1
+                    ''')
+                    
+                    # Reassign clue sets randomly
+                    for char_id in range(1, 9):  # Assuming 8 players
+                        set_number = random.randint(1, 3)
+                        c.execute('UPDATE players SET has_completed=? WHERE id=?', 
+                                (set_number, char_id))
+                    
+                self.db.commit()
+                print("\nAll clue assignments and clues have been reset!")
+                print("Game state set to Act 1, READY")
+                
         elif choice == '2':
             if self.confirm_action("Reset current act to Act 1?"):
                 self.current_act = 1
+                self.db.save_game_state(self.current_act, self.game_state)
                 print("\nAct reset to Act 1!")
+                
         elif choice == '3':
             if self.confirm_action("Reset all player checkins?"):
                 self.reset_all_players()
                 print("\nAll player checkins have been reset!")
+                
         elif choice == '4':
             if self.confirm_action("Reset one player checkins?"):
                 player_id = int(input("User ID to reset: "))
                 self.reset_single_player(player_id)
                 print("\nThis player checkins have been reset!")
+                
         elif choice == '5':
             return
+            
         else:
             print("Invalid choice")
         
-        # Reset game state to WAITING after any reset operation (except back)
-        if choice in ('1', '2', '3', '4'):
-            with self.db.cursor() as c:
-                c.execute('''
-                    UPDATE game_state
-                    SET game_status='WAITING'
-                    WHERE id=1
-                ''')
-            self.game_state = "WAITING"
-            self.db.commit()
-            print("Game state has been reset to WAITING")
-        
         input("Press Enter to continue...")
-    
+
     def _game_clues_exist(self) -> bool:
         """Check if game clues already exist"""
         with self.db.cursor() as c:
@@ -952,10 +973,11 @@ class ClueGameApp:
             
             if not row:
                 return []
-                
+            
+            clues = self._select_weighted_clues(act)
             # Check if we need to generate new reliability ratings
             if row['reliability1'] is None:
-                return self._generate_probabilistic_clues(act)
+                return self._generate_reliability_ratings(clues)
                 
             # Return existing weighted clues
             return [
@@ -993,14 +1015,14 @@ class ClueGameApp:
                     
                     # Unified reliability rating system
                     if is_murderer:
-                        # Murderer's clue: 70% strong (3), 20% medium (2), 10% weak (1)
-                        reliability = 3 if random.random() < 0.7 else (2 if random.random() < 0.66 else 1)
+                        # Murderer's clue: 50% strong (3), 30% medium (2), 20% weak (1)
+                        reliability = 3 if random.random() < 0.5 else (2 if random.random() < 0.6 else 1)
                     elif is_accomplice:
-                        # Accomplice's clue: 60% medium (2), 30% strong (3), 10% weak (1)
-                        reliability = 2 if random.random() < 0.6 else (3 if random.random() < 0.75 else 1)
+                        # Accomplice's clue: 40% medium (2), 35% strong (3), 25% weak (1)
+                        reliability = 2 if random.random() < 0.4 else (3 if random.random() < 0.58 else 1)
                     else:
-                        # Innocent's clue: 80% weak (1), 15% medium (2), 5% strong (3)
-                        reliability = 1 if random.random() < 0.8 else (2 if random.random() < 0.75 else 3)
+                        # Innocent's clue: 60% weak (1), 25% medium (2), 15% strong (3)
+                        reliability = 1 if random.random() < 0.6 else (2 if random.random() < 0.71 else 3)
                 
                 reliability_values.append(reliability)
         
@@ -1596,7 +1618,7 @@ class ClueGameApp:
             if choice == '1':
                 self.view_innocent_hint()
             elif choice == '2':
-                self.view_investigator_info(name)
+                self.view_investigator_info()
             elif choice == '3':
                 return
             else:
@@ -1625,8 +1647,8 @@ class ClueGameApp:
                     continue
                     
                 # Select one character to be the hint for this act
-                # 70% chance to show a real innocent, 30% chance to show a murderer
-                if random.random() < 0.7:
+                # 60% chance to show a real innocent, 40% chance to show a murderer
+                if random.random() < 0.6:
                     # Show a real innocent
                     char_id, char_name = random.choice(innocent_chars)
                     is_innocent = True
@@ -1670,11 +1692,8 @@ class ClueGameApp:
             
             print(f"\nYour investigation suggests that {char_name} is NOT a murderer.")
             
-            # Add reliability indicator (not shown to player, just for debugging)
-            reliability = "RELIABLE" if is_innocent else "MISLEADING"
-            print(f"\n[DEBUG: This hint is {reliability}]")  # Remove this in production
-            
-            print("\nRemember: Even reliable hints might be misleading!")
+            print("\nRemember:\n- Even reliable hints might be misleading!")
+            print("- Your hint might ONLY means that person is not a murderer\n- They can still be an accomplice")
         
         input("\nPress Enter to continue...")
   
@@ -1702,7 +1721,10 @@ class ClueGameApp:
             print("- Your analysis is crucial to solving the case")
             print("\nRemember:")
             print("- Not all clues are equally trustworthy")
-            print("- Cross-reference information with other players")
+            print("- Some reliability rating might be misleading")
+            print("- DO NOT share your clues and identity carelessly")
+            print("- Murderers and their accomplice could use your informations to identify and help each other")
+            print("- Make sure to ONLY share your identity with trusted innocents")
             print("- Murderers may try to mislead you")
         else:
             print("\nError: Character information not found!")
@@ -1729,12 +1751,14 @@ class ClueGameApp:
             print(f"Role: {'Investigator' if result['is_investigator'] else 'Unknown'}")
             print("\nSpecial Abilities:")
             print("- Get hints about potentially innocent characters")
-            print("- 70% chance your information is accurate")
+            print("- 60% chance your information is accurate")
             print("- Your leads can help narrow down suspects")
             print("\nRemember:")
-            print("- Verify your information with other players")
-            print("- Some leads might be intentionally misleading")
+            print("- Verify your information with other trusted players")
+            print("- Your info might be intentionally misleading")
             print("- Work with the Detective to solve the case")
+            print("- DO NOT share your indentity or clues carelessly")
+            print("- Murders and their accomplice might be able to use this to mislead everyone")
         else:
             print("\nError: Character information not found!")
         
