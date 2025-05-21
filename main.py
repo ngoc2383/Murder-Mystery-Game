@@ -573,19 +573,27 @@ class ClueGameApp:
         self.db.commit()
 
     def _select_final_clues_for_acts(self):
-        """Select and store final clues for all acts using weighted selection"""
+        """Select and store final clues for all acts with reliability ratings"""
         with self.db.cursor() as c:
             # Clear any existing game clues
             c.execute('DELETE FROM game_clues')
             
             for act in range(1, 4):  # Acts 1-3
+                # Get the selected clues
                 clues = self._select_weighted_clues(act)
+                
+                # Generate reliability ratings for these clues
+                reliability_values = self._generate_reliability_ratings(clues)
+                
+                # Store clues with their reliability ratings
                 c.execute('''
-                    INSERT INTO game_clues (act, clue1, clue2, clue3)
-                    VALUES (?, ?, ?, ?)
-                ''', (act, *clues))
+                    INSERT INTO game_clues 
+                    (act, clue1, clue2, clue3, reliability1, reliability2, reliability3)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (act, clues[0], clues[1], clues[2], 
+                    reliability_values[0], reliability_values[1], reliability_values[2]))
         self.db.commit()
-
+ 
     def _select_weighted_clues(self, act: int) -> List[str]:
         """Select 3 clues for an act with murderer weighting"""
         with self.db.cursor() as c:
@@ -967,25 +975,16 @@ class ClueGameApp:
                 (row['clue3'], row['reliability3'])
             ]
 
-    def _generate_probabilistic_clues(self, act: int) -> List[Tuple[str, int]]:
-        """Generate new probabilistic reliability ratings for clues"""
+    def _generate_reliability_ratings(self, clues: List[str]) -> List[int]:
+        """Generate reliability ratings for clues (same for all special roles)"""
+        reliability_values = []
+        
         with self.db.cursor() as c:
-            # Get the base clues
-            c.execute('SELECT clue1, clue2, clue3 FROM game_clues WHERE act=?', (act,))
-            game_clues = c.fetchone()
-            
-            if not game_clues:
-                return []
-                
-            weighted_clues = []
-            reliability_values = []
-            
-            for clue in [game_clues['clue1'], game_clues['clue2'], game_clues['clue3']]:
+            for clue in clues:
                 try:
                     character_name = clue.split(' - ')[0].strip()
                 except:
                     # Fallback if clue format is different
-                    weighted_clues.append((clue, 1))
                     reliability_values.append(1)
                     continue
                     
@@ -998,58 +997,51 @@ class ClueGameApp:
                 result = c.fetchone()
                 
                 if not result:
-                    weight = 1
+                    reliability = 1
                 else:
                     is_murderer = result['is_murderer']
                     is_accomplice = result['is_accomplice']
                     
-                    # Probabilistic weight assignment
-                    rand_val = random.random()
-                    
+                    # Unified reliability rating system
                     if is_murderer:
                         # Murderer's clue: 70% strong (3), 20% medium (2), 10% weak (1)
-                        if rand_val < 0.7:
-                            weight = 3
-                        elif rand_val < 0.9:
-                            weight = 2
-                        else:
-                            weight = 1
+                        reliability = 3 if random.random() < 0.7 else (2 if random.random() < 0.66 else 1)
                     elif is_accomplice:
                         # Accomplice's clue: 60% medium (2), 30% strong (3), 10% weak (1)
-                        if rand_val < 0.6:
-                            weight = 2
-                        elif rand_val < 0.9:
-                            weight = 3
-                        else:
-                            weight = 1
+                        reliability = 2 if random.random() < 0.6 else (3 if random.random() < 0.75 else 1)
                     else:
                         # Innocent's clue: 80% weak (1), 15% medium (2), 5% strong (3)
-                        if rand_val < 0.8:
-                            weight = 1
-                        elif rand_val < 0.95:
-                            weight = 2
-                        else:
-                            weight = 3
+                        reliability = 1 if random.random() < 0.8 else (2 if random.random() < 0.75 else 3)
                 
-                weighted_clues.append((clue, weight))
-                reliability_values.append(weight)
-            
-            # Store the reliability values
+                reliability_values.append(reliability)
+        
+        return reliability_values
+  
+    def get_weighted_clues(self, act: int) -> List[Tuple[str, int]]:
+        """Get clues with pre-generated reliability ratings"""
+        with self.db.cursor() as c:
             c.execute('''
-                UPDATE game_clues 
-                SET reliability1=?, reliability2=?, reliability3=?
+                SELECT clue1, clue2, clue3, reliability1, reliability2, reliability3 
+                FROM game_clues 
                 WHERE act=?
-            ''', (*reliability_values, act))
-            self.db.commit()
+            ''', (act,))
+            row = c.fetchone()
             
-            return weighted_clues
-   
+            if not row:
+                return []
+                
+            return [
+                (row['clue1'], row['reliability1']),
+                (row['clue2'], row['reliability2']),
+                (row['clue3'], row['reliability3'])
+            ]
+
     def view_accomplice_clues_weighted(self):
         """Show standard 3 game clues with reliability ratings"""
         clear_screen()
         print(f"=== YOUR SPECIAL CLUES (ACT {self.current_act}) ===")
         
-        clues = self._get_weighted_accomplice_clues(self.current_act)
+        clues = self.get_weighted_clues(self.current_act)
         
         if not clues:
             print("\nNo clues available for current act!")
@@ -1059,11 +1051,50 @@ class ClueGameApp:
         print("\nThe same clues everyone sees, but you know which might be trustworthy:")
         for i, (clue, weight) in enumerate(clues, 1):
             print(f"\n{i}. {clue}")
-            print(f"   Reliability: {'★' * weight}{'☆' * (3-weight)}")
+            reliability_desc = {
+                3: "★★★ Highly reliable",
+                2: "★★☆ Moderately reliable",
+                1: "★☆☆ Potentially unreliable"
+            }.get(weight, "Unknown reliability")
+            print(f"   {reliability_desc}")
         
-        print("\nRemember: Even highly-rated clues might be misleading!")
-        input("\nPress Enter to continue...") 
-    
+        print("\nAccomplice Notes:")
+        print("- ★★★ clues most likely point towards the murderer")
+        print("- ★★☆ clues may point towards murderer")
+        print("- ★☆☆ clues may be intentionally misleading")
+        print("- Reliability ratings aren't perfect - trust your instincts!")
+        input("\nPress Enter to continue...")
+
+    def view_detective_clues_weighted(self):
+        """Show standard 3 game clues with reliability ratings"""
+        clear_screen()
+        print(f"=== YOUR INVESTIGATION CLUES (ACT {self.current_act}) ===")
+        
+        clues = self.get_weighted_clues(self.current_act)
+        
+        if not clues:
+            print("\nNo clues available for current act!")
+            input("Press Enter to continue...")
+            return
+        
+        print("\nThe same clues everyone sees, but you know which might be trustworthy:")
+        for i, (clue, weight) in enumerate(clues, 1):
+            print(f"\n{i}. {clue}")
+            reliability_desc = {
+                3: "★★★ Highly reliable",
+                2: "★★☆ Moderately reliable",
+                1: "★☆☆ Potentially unreliable"
+            }.get(weight, "Unknown reliability")
+            print(f"   {reliability_desc}")
+        
+        print("\nInvestigation Notes:")
+        print("- ★★★ clues most likely point towards the murderer")
+        print("- ★★☆ clues may point towards murderer")
+        print("- ★☆☆ clues may be intentionally misleading")
+        print("- Reliability ratings aren't perfect - trust your instincts!")
+        
+        input("\nPress Enter to continue...")
+  
     def view_accomplice_info(self):
         """Show the accomplice's character information"""
         clear_screen()
@@ -1546,14 +1577,14 @@ class ClueGameApp:
         while True:
             clear_screen()
             print(f"=== DETECTIVE MENU ({name}) ===")
-            print("1. View Weighted Clues")
+            print("1. View Investigation Clues")
             print("2. View My Role Info")
             print("3. Return to Main Menu")
             
             choice = input("Select an option: ").strip()
             
             if choice == '1':
-                self.view_accomplice_clues_weighted()
+                self.view_detective_clues_weighted()
             elif choice == '2':
                 self.view_detective_info()
             elif choice == '3':
@@ -1561,7 +1592,7 @@ class ClueGameApp:
             else:
                 print("Invalid choice")
                 input("Press Enter to continue...")
-
+  
     def investigator_menu(self, name: str):
         """Menu for the investigator"""
         while True:

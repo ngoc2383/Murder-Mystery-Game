@@ -407,7 +407,7 @@ class ClueData:
                     clue1 TEXT,
                     clue2 TEXT,
                     clue3 TEXT,
-                    reliability1 INTEGER,  # 1-3 scale
+                    reliability1 INTEGER,
                     reliability2 INTEGER,
                     reliability3 INTEGER
                 )
