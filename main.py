@@ -1434,19 +1434,11 @@ class ClueGameApp:
         print(f"=== YOUR ROLE INFO ({name}) ===")
         
         with self.db.cursor() as c:
-            # Get co-murderer's name
-            c.execute('''
-                SELECT name FROM players 
-                WHERE is_murderer=1 AND id!=?
-            ''', (player_id,))
-            co_murderer = c.fetchone()[0]
-            
             # Get password
             c.execute('SELECT password FROM players WHERE id=?', (player_id,))
             password = c.fetchone()[0]
         
         print(f"\nYou are: The Murderer")
-        print(f"Your Partner: {co_murderer}")
         print(f"Your Password: {password}")
         print("\nSpecial Abilities:")
         print("- See secret murderer-only clues")
